@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "yfinance": {
+      "command": "python",
+      "args": [
+        "main.py"
+      ]
+    }
+  }
+}
