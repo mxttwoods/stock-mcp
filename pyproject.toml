@@ -5,9 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp>=1.22.0",
-    "numpy>=1.24",
-    "pandas>=2.0",
-    "ruff>=0.14.7",
-    "yfinance>=0.2.40",
+    "fastmcp>=2.13.1",
+    "mcp",
+    "numpy",
+    "pandas",
+    "ruff",
+    "uvicorn",
+    "yfinance",
 ]

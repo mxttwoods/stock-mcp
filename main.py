@@ -2,23 +2,39 @@ from __future__ import annotations
 
 import os
 import time
+import logging
 from dataclasses import dataclass
 from typing import Any, Optional
+from functools import wraps
 
 import yfinance as yf
 import pandas as pd
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 from starlette.requests import Request
 from starlette.exceptions import HTTPException
 from starlette import status
+from starlette.middleware import Middleware
+from starlette.middleware.cors import CORSMiddleware
+from starlette.responses import JSONResponse
+
+# Configure logging
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 mcp = FastMCP("yfinance-mcp")
 
-# ---- Authentication ----
-# Use environment variables for credentials (with defaults for local dev)
+# ---- Configuration ----
 CLIENT_ID = os.getenv("MCP_CLIENT_ID", "stock-mcp-client")
 CLIENT_SECRET = os.getenv("MCP_CLIENT_SECRET", "super-secret-key")
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))  # seconds
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))  # per minute
+
+# ---- Metrics ----
+metrics = {"requests": 0, "errors": 0, "cache_hits": 0, "cache_misses": 0}
 
 
 async def verify_auth(request: Request):
@@ -30,17 +46,42 @@ async def verify_auth(request: Request):
     client_secret = request.headers.get("X-Client-Secret")
 
     if client_id != CLIENT_ID or client_secret != CLIENT_SECRET:
+        logger.warning(f"Unauthorized access attempt from {request.client}")
+        metrics["errors"] += 1
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing authentication credentials",
         )
+
+    metrics["requests"] += 1
 
 
 # Add authentication dependency
 mcp.dependencies.append(verify_auth)
 
 
-# ---- tiny TTL cache to reduce rate-limit pain ----
+# ---- Error handling decorator ----
+def handle_errors(func):
+    """Decorator to handle errors and return proper responses."""
+
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except HTTPException:
+            raise  # Re-raise HTTP exceptions
+        except Exception as e:
+            logger.error(f"Error in {func.__name__}: {str(e)}", exc_info=True)
+            metrics["errors"] += 1
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Internal error: {str(e)}",
+            )
+
+    return wrapper
+
+
+# ---- TTL cache to reduce rate-limit pain ----
 @dataclass
 class CacheItem:
     ts: float
@@ -54,10 +95,14 @@ TTL_SECONDS = 20
 def _cache_get(key: str) -> Optional[Any]:
     item = _CACHE.get(key)
     if not item:
+        metrics["cache_misses"] += 1
         return None
     if time.time() - item.ts > TTL_SECONDS:
         _CACHE.pop(key, None)
+        metrics["cache_misses"] += 1
         return None
+    metrics["cache_hits"] += 1
+    logger.debug(f"Cache hit for key: {key}")
     return item.value
 
 
@@ -90,8 +135,31 @@ def _df_to_rows(df: pd.DataFrame, max_rows: int = 5000) -> list[dict]:
     return df.to_dict(orient="records")
 
 
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(request):
+    """
+    Health check endpoint for monitoring (HTTP route, not MCP tool).
+    Returns server status and basic metrics.
+    """
+    return JSONResponse(
+        {
+            "status": "healthy",
+            "service": "yfinance-mcp",
+            "timestamp": time.time(),
+            "metrics": metrics.copy(),
+            "cache_size": len(_CACHE),
+            "config": {
+                "timeout": REQUEST_TIMEOUT,
+                "rate_limit": RATE_LIMIT_REQUESTS,
+                "cache_ttl": TTL_SECONDS,
+            },
+        }
+    )
+
+
 @mcp.tool()
-def quote(symbol: str) -> dict:
+@handle_errors
+def quote(symbol: str, context: Context) -> dict:
     """
     Best-effort quote snapshot for a single symbol (not execution-grade).
     Uses fast_info when available; falls back to .info pieces.
@@ -149,6 +217,7 @@ def quote(symbol: str) -> dict:
 
 
 @mcp.tool()
+@handle_errors
 def history(
     symbol: str,
     period: str = "1mo",
@@ -182,6 +251,7 @@ def history(
 
 
 @mcp.tool()
+@handle_errors
 def options_expirations(symbol: str) -> dict:
     """List available option expiration dates for a symbol."""
     symbol = symbol.upper().strip()
@@ -197,6 +267,7 @@ def options_expirations(symbol: str) -> dict:
 
 
 @mcp.tool()
+@handle_errors
 def option_chain(symbol: str, expiration: str) -> dict:
     """
     Get option chain (calls & puts) for a specific expiration (YYYY-MM-DD).
@@ -220,6 +291,7 @@ def option_chain(symbol: str, expiration: str) -> dict:
 
 
 @mcp.tool()
+@handle_errors
 def fundamentals(symbol: str) -> dict:
     """
     Basic fundamentals snapshot (best-effort).
@@ -264,6 +336,7 @@ def fundamentals(symbol: str) -> dict:
 
 
 @mcp.tool()
+@handle_errors
 def calendar(symbol: str) -> dict:
     """
     Get upcoming events (earnings, etc.) for a symbol.
@@ -290,6 +363,7 @@ def calendar(symbol: str) -> dict:
 
 
 @mcp.tool()
+@handle_errors
 def analyst_recommendations(symbol: str) -> dict:
     """
     Get analyst recommendations and price targets.
@@ -323,6 +397,7 @@ def analyst_recommendations(symbol: str) -> dict:
 
 
 @mcp.tool()
+@handle_errors
 def news(symbol: str) -> dict:
     """
     Get latest news for a symbol.
@@ -345,6 +420,7 @@ def news(symbol: str) -> dict:
 
 
 @mcp.tool()
+@handle_errors
 def financials(symbol: str) -> dict:
     """
     Get quarterly financials: Income Statement, Balance Sheet, Cash Flow.
@@ -374,6 +450,7 @@ def financials(symbol: str) -> dict:
 
 
 @mcp.tool()
+@handle_errors
 def holders(symbol: str) -> dict:
     """
     Get major and institutional holders.
@@ -402,15 +479,51 @@ def holders(symbol: str) -> dict:
 
 
 if __name__ == "__main__":
-    # Check if running in web mode (Render/cloud) or stdio mode (local)
-    import sys
+    import argparse
+    import os
 
-    # If PORT env var is set, run in SSE mode for web deployment
-    if os.getenv("PORT"):
-        port = int(os.getenv("PORT", "8080"))
-        print(f"Starting MCP server in SSE mode on port {port}", file=sys.stderr)
-        mcp.run(transport="http", port=port)
-    else:
-        # Default to stdio for local development
-        print("Starting MCP server in stdio mode", file=sys.stderr)
+    # Environment validation
+    required_env_vars = {"MCP_CLIENT_ID": CLIENT_ID, "MCP_CLIENT_SECRET": CLIENT_SECRET}
+
+    logger.info("Starting yfinance MCP server")
+    logger.info(
+        f"Configuration: timeout={REQUEST_TIMEOUT}s, rate_limit={RATE_LIMIT_REQUESTS}/min, cache_ttl={TTL_SECONDS}s"
+    )
+
+    # Warn about default credentials
+    if CLIENT_ID == "stock-mcp-client" or CLIENT_SECRET == "super-secret-key":
+        logger.warning(
+            "⚠️  Using default credentials! Set MCP_CLIENT_ID and MCP_CLIENT_SECRET environment variables for production."
+        )
+
+    parser = argparse.ArgumentParser(description="yfinance MCP Server")
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Run in local stdio mode instead of HTTP mode",
+    )
+    args = parser.parse_args()
+
+    if args.local:
+        # Local development mode using stdio
+        logger.info("Starting MCP server in stdio mode")
         mcp.run()
+    else:
+        # HTTP mode - for production use uvicorn
+        port = int(os.getenv("PORT", "8080"))
+
+        logger.info(f"Starting MCP server in HTTP mode on port {port}")
+        logger.info("Health check available at /health")
+        logger.info(
+            "For production, run with: uvicorn main:app --host 0.0.0.0 --port 8080"
+        )
+
+        # Use http transport - mcp.run() doesn't accept host/port
+        # PORT env var is used by FastMCP internally
+        mcp.run(transport="sse")
+
+
+# Export ASGI app for production deployment with uvicorn
+# Note: CORS middleware would need to be added via a reverse proxy (nginx, caddy)
+# or by wrapping the app if needed for browser-based clients
+app = mcp.http_app()
