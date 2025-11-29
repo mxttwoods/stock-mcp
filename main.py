@@ -478,6 +478,11 @@ def holders(symbol: str) -> dict:
     return _cache_set(key, out)
 
 
+@mcp.tool
+def greet(name: str) -> str:
+    return f"Hello, {name}!"
+
+
 if __name__ == "__main__":
     import argparse
     import os
