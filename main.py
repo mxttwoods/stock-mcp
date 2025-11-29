@@ -515,12 +515,12 @@ if __name__ == "__main__":
         mcp.run()
     else:
         # HTTP mode - for production use uvicorn
-        port = int(os.getenv("PORT", "8080"))
+        port = int(os.getenv("PORT", "10000"))
 
         logger.info(f"Starting MCP server in HTTP mode on port {port}")
         logger.info("Health check available at /health")
         logger.info(
-            "For production, run with: uvicorn main:app --host 0.0.0.0 --port 8080"
+            "For production, run with: uvicorn main:app --host 0.0.0.0 --port 10000"
         )
 
         # Use http transport - mcp.run() doesn't accept host/port
@@ -544,7 +544,7 @@ if __name__ == "__main__":
 # Export ASGI app for production deployment with uvicorn
 # Note: CORS middleware would need to be added via a reverse proxy (nginx, caddy)
 # or by wrapping the app if needed for browser-based clients
-# app = mcp.http_app(
-#     transport="http",
-#     path="/api/mcp",
-# )
+app = mcp.http_app(
+    transport="http",
+    path="/api/mcp",
+)

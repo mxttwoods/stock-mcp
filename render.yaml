@@ -5,7 +5,7 @@ services:
     region: oregon
     plan: free
     buildCommand: pip install uv && uv sync
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
     envVars:
       - key: MCP_CLIENT_ID
         sync: false
