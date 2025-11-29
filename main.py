@@ -408,9 +408,8 @@ if __name__ == "__main__":
     # If PORT env var is set, run in SSE mode for web deployment
     if os.getenv("PORT"):
         port = int(os.getenv("PORT", "8000"))
-        host = os.getenv("HOST", "0.0.0.0")
-        print(f"Starting MCP server in SSE mode on {host}:{port}", file=sys.stderr)
-        mcp.run(transport="sse", host=host, port=port)
+        print(f"Starting MCP server in SSE mode on port {port}", file=sys.stderr)
+        mcp.run(transport="sse", port=port)
     else:
         # Default to stdio for local development
         print("Starting MCP server in stdio mode", file=sys.stderr)
