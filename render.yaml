@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: stock-mcp
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install uv && uv sync
+    startCommand: uv run main.py
+    envVars:
+      - key: MCP_CLIENT_ID
+        sync: false
+      - key: MCP_CLIENT_SECRET
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.10.16

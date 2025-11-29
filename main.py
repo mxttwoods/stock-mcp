@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -8,8 +9,35 @@ import yfinance as yf
 import pandas as pd
 
 from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.exceptions import HTTPException
+from starlette import status
 
 mcp = FastMCP("yfinance-mcp")
+
+# ---- Authentication ----
+# Use environment variables for credentials (with defaults for local dev)
+CLIENT_ID = os.getenv("MCP_CLIENT_ID", "stock-mcp-client")
+CLIENT_SECRET = os.getenv("MCP_CLIENT_SECRET", "super-secret-key")
+
+
+async def verify_auth(request: Request):
+    """
+    Verify client credentials via headers.
+    Raises HTTPException(401) if credentials are missing or invalid.
+    """
+    client_id = request.headers.get("X-Client-Id")
+    client_secret = request.headers.get("X-Client-Secret")
+
+    if client_id != CLIENT_ID or client_secret != CLIENT_SECRET:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing authentication credentials",
+        )
+
+
+# Add authentication dependency
+mcp.dependencies.append(verify_auth)
 
 
 # ---- tiny TTL cache to reduce rate-limit pain ----
@@ -374,5 +402,16 @@ def holders(symbol: str) -> dict:
 
 
 if __name__ == "__main__":
-    # Runs as an MCP server (typically stdio transport)
-    mcp.run()
+    # Check if running in web mode (Render/cloud) or stdio mode (local)
+    import sys
+
+    # If PORT env var is set, run in SSE mode for web deployment
+    if os.getenv("PORT"):
+        port = int(os.getenv("PORT", "8000"))
+        host = os.getenv("HOST", "0.0.0.0")
+        print(f"Starting MCP server in SSE mode on {host}:{port}", file=sys.stderr)
+        mcp.run(transport="sse", host=host, port=port)
+    else:
+        # Default to stdio for local development
+        print("Starting MCP server in stdio mode", file=sys.stderr)
+        mcp.run()
