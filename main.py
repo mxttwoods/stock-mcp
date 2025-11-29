@@ -14,8 +14,6 @@ from fastmcp import FastMCP, Context
 from starlette.requests import Request
 from starlette.exceptions import HTTPException
 from starlette import status
-from starlette.middleware import Middleware
-from starlette.middleware.cors import CORSMiddleware
 from starlette.responses import JSONResponse
 
 # Configure logging
