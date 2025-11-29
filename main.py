@@ -10,7 +10,7 @@ from functools import wraps
 import yfinance as yf
 import pandas as pd
 
-from mcp.server.fastmcp import FastMCP, Context
+from fastmcp import FastMCP, Context
 from starlette.requests import Request
 from starlette.exceptions import HTTPException
 from starlette import status
@@ -25,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("yfinance-mcp")
+mcp = FastMCP("yfinance-mcp", stateless_http=True)
 
 # ---- Configuration ----
 CLIENT_ID = os.getenv("MCP_CLIENT_ID", "stock-mcp-client")
@@ -520,10 +520,26 @@ if __name__ == "__main__":
 
         # Use http transport - mcp.run() doesn't accept host/port
         # PORT env var is used by FastMCP internally
-        mcp.run(transport="sse")
+        mcp.run(transport="http", host="0.0.0.0", port=port)
 
-
+# middleware = [
+#     Middleware(
+#         CORSMiddleware,
+#         allow_origins=["*"],  # Allow all origins; use specific origins for security
+#         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+#         allow_headers=[
+#             "mcp-protocol-version",
+#             "mcp-session-id",
+#             "Authorization",
+#             "Content-Type",
+#         ],
+#         expose_headers=["mcp-session-id"],
+#     )
+# ]
 # Export ASGI app for production deployment with uvicorn
 # Note: CORS middleware would need to be added via a reverse proxy (nginx, caddy)
 # or by wrapping the app if needed for browser-based clients
-app = mcp.http_app()
+# app = mcp.http_app(
+#     transport="http",
+#     path="/api/mcp",
+# )
