@@ -11,7 +11,6 @@ import yfinance as yf
 import pandas as pd
 
 from fastmcp import FastMCP, Context
-from starlette.requests import Request
 from starlette.exceptions import HTTPException
 from starlette import status
 from starlette.responses import JSONResponse
@@ -23,42 +22,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("yfinance-mcp", stateless_http=True)
+mcp = FastMCP(
+    "yfinance-mcp",
+    stateless_http=True,
+)
 
 # ---- Configuration ----
-CLIENT_ID = os.getenv("MCP_CLIENT_ID", "stock-mcp-client")
-CLIENT_SECRET = os.getenv("MCP_CLIENT_SECRET", "super-secret-key")
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))  # seconds
 RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))  # per minute
 
-# ---- Metrics ----
-metrics = {"requests": 0, "errors": 0, "cache_hits": 0, "cache_misses": 0}
 
-
-async def verify_auth(request: Request):
-    """
-    Verify client credentials via headers.
-    Raises HTTPException(401) if credentials are missing or invalid.
-    """
-    client_id = request.headers.get("X-Client-Id")
-    client_secret = request.headers.get("X-Client-Secret")
-
-    if client_id != CLIENT_ID or client_secret != CLIENT_SECRET:
-        logger.warning(f"Unauthorized access attempt from {request.client}")
-        metrics["errors"] += 1
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing authentication credentials",
-        )
-
-    metrics["requests"] += 1
-
-
-# Add authentication dependency
-mcp.dependencies.append(verify_auth)
-
-
-# ---- Error handling decorator ----
 def handle_errors(func):
     """Decorator to handle errors and return proper responses."""
 
@@ -70,7 +43,6 @@ def handle_errors(func):
             raise  # Re-raise HTTP exceptions
         except Exception as e:
             logger.error(f"Error in {func.__name__}: {str(e)}", exc_info=True)
-            metrics["errors"] += 1
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Internal error: {str(e)}",
@@ -93,13 +65,10 @@ TTL_SECONDS = 20
 def _cache_get(key: str) -> Optional[Any]:
     item = _CACHE.get(key)
     if not item:
-        metrics["cache_misses"] += 1
         return None
     if time.time() - item.ts > TTL_SECONDS:
         _CACHE.pop(key, None)
-        metrics["cache_misses"] += 1
         return None
-    metrics["cache_hits"] += 1
     logger.debug(f"Cache hit for key: {key}")
     return item.value
 
@@ -137,14 +106,13 @@ def _df_to_rows(df: pd.DataFrame, max_rows: int = 5000) -> list[dict]:
 async def health_check(request):
     """
     Health check endpoint for monitoring (HTTP route, not MCP tool).
-    Returns server status and basic metrics.
+    Returns server status and basic info.
     """
     return JSONResponse(
         {
             "status": "healthy",
             "service": "yfinance-mcp",
             "timestamp": time.time(),
-            "metrics": metrics.copy(),
             "cache_size": len(_CACHE),
             "config": {
                 "timeout": REQUEST_TIMEOUT,
@@ -159,8 +127,30 @@ async def health_check(request):
 @handle_errors
 def quote(symbol: str, context: Context) -> dict:
     """
-    Best-effort quote snapshot for a single symbol (not execution-grade).
-    Uses fast_info when available; falls back to .info pieces.
+    Get real-time quote snapshot for a stock symbol.
+
+    Use this for quick price checks and current market state before deeper analysis.
+
+    Args:
+        symbol: Stock ticker symbol (e.g., "AAPL", "TSLA", "SPY"). Will be auto-converted to uppercase.
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - price: Current price (float or None)
+        - previousClose: Previous day's closing price
+        - change: Dollar change from previous close
+        - changePercent: Percentage change from previous close
+        - currency: Currency code (e.g., "USD")
+        - marketTime: Unix timestamp of last market time
+        - raw: Additional metadata (market state, exchange, quote type)
+
+    Example:
+        Input: quote("AAPL")
+        Output: {"symbol": "AAPL", "price": 189.50, "previousClose": 188.00,
+                 "change": 1.50, "changePercent": 0.80, "currency": "USD", ...}
+
+    Note: Data is cached for 20 seconds. This is NOT real-time execution-grade data.
     """
     symbol = symbol.upper().strip()
     key = f"quote:{symbol}"
@@ -223,8 +213,40 @@ def history(
     auto_adjust: bool = True,
 ) -> dict:
     """
-    OHLCV history. period examples: 5d,1mo,3mo,6mo,1y,5y,max
-    interval examples: 1m,5m,15m,60m,1d,1wk,1mo
+    Get OHLCV (Open, High, Low, Close, Volume) historical data for technical analysis.
+
+    Use this for: trend analysis, charting, backtesting strategies, and technical indicators.
+
+    Args:
+        symbol: Stock ticker symbol (e.g., "TSLA", "NVDA")
+        period: Time range. Examples:
+            - Intraday: "1d", "5d"
+            - Short-term: "1mo", "3mo"
+            - Long-term: "1y", "5y", "max"
+        interval: Data frequency. Examples:
+            - Intraday: "1m", "5m", "15m", "60m"
+            - Daily+: "1d", "1wk", "1mo"
+            (Note: Intraday intervals limited to <60 days of data)
+        auto_adjust: If True, adjusts prices for splits/dividends (recommended: True)
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - period, interval, auto_adjust: Your input parameters
+        - rows: Array of dicts, each with Date, Open, High, Low, Close, Volume
+                (max 5000 rows, newest data if larger)
+
+    Examples:
+        1. Analyze yearly trend:
+           history("AAPL", period="1y", interval="1d")
+
+        2. Intraday pattern for last 5 days:
+           history("SPY", period="5d", interval="5m")
+
+        3. Weekly data for 5 years:
+           history("MSFT", period="5y", interval="1wk")
+
+    Note: Cached for 20 seconds. Use larger intervals for longer periods to reduce data size.
     """
     symbol = symbol.upper().strip()
     key = f"hist:{symbol}:{period}:{interval}:{auto_adjust}"
@@ -251,7 +273,30 @@ def history(
 @mcp.tool()
 @handle_errors
 def options_expirations(symbol: str) -> dict:
-    """List available option expiration dates for a symbol."""
+    """
+    List all available option expiration dates for a symbol.
+
+    Use this FIRST before calling option_chain to see what dates are available.
+
+    Args:
+        symbol: Stock ticker symbol (e.g., "AAPL", "SPY")
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - expirations: Array of date strings in YYYY-MM-DD format
+
+    Example:
+        Input: options_expirations("AAPL")
+        Output: {"symbol": "AAPL", "expirations": ["2025-12-20", "2026-01-17", ...]}
+
+    Workflow:
+        Step 1: Use this tool to get available dates
+        Step 2: Pick a date from the expirations list
+        Step 3: Call option_chain(symbol, chosen_date) for detailed strikes
+
+    Note: Not all stocks have options. Returns empty array if no options available.
+    """
     symbol = symbol.upper().strip()
     key = f"opts_exp:{symbol}"
     hit = _cache_get(key)
@@ -268,7 +313,42 @@ def options_expirations(symbol: str) -> dict:
 @handle_errors
 def option_chain(symbol: str, expiration: str) -> dict:
     """
-    Get option chain (calls & puts) for a specific expiration (YYYY-MM-DD).
+    Get complete option chain (calls and puts) for a specific expiration date.
+
+    Use for: covered calls, protective puts, spreads, and options strategy analysis.
+    IMPORTANT: Call options_expirations(symbol) FIRST to get valid expiration dates.
+
+    Args:
+        symbol: Stock ticker symbol
+        expiration: Expiration date in YYYY-MM-DD format (must be from options_expirations list)
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - expiration: The expiration date
+        - calls: Array of call option contracts, each with:
+            * strike: Strike price
+            * lastPrice: Last traded price (premium)
+            * bid, ask: Current bid/ask prices
+            * volume: Trading volume
+            * openInterest: Open interest
+            * impliedVolatility: IV percentage
+            * Greeks: delta, gamma, theta, vega, rho (if available)
+        - puts: Array of put option contracts (same structure as calls)
+        (max 15000 rows per calls/puts)
+
+    Example:
+        Input: option_chain("SPY", "2025-12-20")
+        Output: {"symbol": "SPY", "expiration": "2025-12-20",
+                 "calls": [{"strike": 500, "lastPrice": 12.50, "impliedVolatility": 0.18, ...}, ...],
+                 "puts": [{"strike": 500, "lastPrice": 8.20, ...}, ...]}
+
+    Strategy Tips:
+        - Covered calls: Look for strikes 5-10% above current price, ~30-45 days out
+        - Protective puts: Strikes 5-10% below current, check earnings first (use calendar tool)
+        - High volume + open interest often means better fills
+
+    Note: Check calendar(symbol) for earnings dates to avoid IV crush!
     """
     symbol = symbol.upper().strip()
     key = f"opts_chain:{symbol}:{expiration}"
@@ -292,7 +372,42 @@ def option_chain(symbol: str, expiration: str) -> dict:
 @handle_errors
 def fundamentals(symbol: str) -> dict:
     """
-    Basic fundamentals snapshot (best-effort).
+    Get key fundamental metrics snapshot for company analysis.
+
+    Use for: value investing, company screening, comparing financial health, and valuation.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - info: Dict containing:
+            * shortName: Company name
+            * sector, industry: Classification
+            * exchange: Which exchange it trades on
+            * marketCap: Market capitalization
+            * trailingPE, forwardPE: Price-to-earnings ratios
+            * profitMargins, grossMargins, operatingMargins: Profitability metrics (%)
+            * revenueGrowth, earningsGrowth: Growth rates (%)
+            * beta: Volatility vs market
+            * dividendYield: Dividend yield (%)
+        - raw_size: Number of total fields in yfinance info (for reference)
+
+    Example:
+        Input: fundamentals("MSFT")
+        Output: {"symbol": "MSFT",
+                 "info": {"shortName": "Microsoft", "sector": "Technology",
+                          "trailingPE": 35.2, "marketCap": 3000000000000, ...},
+                 "raw_size": 142}
+
+    Analysis Tips:
+        - Compare P/E ratios within same sector
+        - Look for positive earnings growth + healthy margins
+        - High beta (>1.5) = more volatile than market
+        - Dividend yield good for income strategies
+
+    Note: Some fields may be None if not available for that symbol.
     """
     symbol = symbol.upper().strip()
     key = f"fund:{symbol}"
@@ -337,7 +452,35 @@ def fundamentals(symbol: str) -> dict:
 @handle_errors
 def calendar(symbol: str) -> dict:
     """
-    Get upcoming events (earnings, etc.) for a symbol.
+    Get upcoming corporate events, especially earnings dates.
+
+    Use this to: time trades around earnings, avoid IV crush on options, plan entry/exit points.
+    CRITICAL for options traders: check this before selling options to avoid earnings surprises!
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - calendar: Array of event dicts with keys like:
+            * Earnings Date: Upcoming earnings announcement
+            * Ex-Dividend Date: When stock goes ex-dividend
+            * Dividend Date: When dividends are paid
+            (Format may vary, check actual output)
+
+    Example:
+        Input: calendar("NFLX")
+        Output: {"symbol": "NFLX",
+                 "calendar": [{"Earnings Date": "2025-01-20", ...}]}
+
+    Options Trading Warning:
+        - Implied Volatility (IV) typically spikes before earnings
+        - IV "crush" happens after earnings when uncertainty resolves
+        - Selling options right before earnings = high risk of assignment
+        - Check this tool before ANY options strategy!
+
+    Note: Events are forward-looking. May be empty if no upcoming events scheduled.
     """
     symbol = symbol.upper().strip()
     key = f"cal:{symbol}"
@@ -364,7 +507,37 @@ def calendar(symbol: str) -> dict:
 @handle_errors
 def analyst_recommendations(symbol: str) -> dict:
     """
-    Get analyst recommendations and price targets.
+    Get analyst ratings and price targets from Wall Street.
+
+    Use this to: understand Wall Street consensus, gauge sentiment, and compare targets to current price.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - recommendations: Array of historical rating changes (max 100 rows)
+            * Each entry has: date, firm, toGrade (Buy/Hold/Sell), fromGrade, action
+        - targets: Dict with analyst price targets:
+            * current: Latest consensus target
+            * mean, median: Average targets
+            * low, high: Range of targets
+
+    Example:
+        Input: analyst_recommendations("AMD")
+        Output: {"symbol": "AMD",
+                 "recommendations": [{"date": "2025-11-15", "firm": "Goldman",
+                                      "toGrade": "Buy", "fromGrade": "Neutral"}, ...],
+                 "targets": {"current": 185, "mean": 180, "low": 150, "high": 210}}
+
+    Interpretation:
+        - More "Buy" upgrades = bullish sentiment
+        - Price below targets = potential upside (but verify fundamentals!)
+        - Wide target range (high - low) = high uncertainty
+        - Track changes over time to see sentiment shifts
+
+    Note: This is historical data. Analysts can be wrong. Use as one signal among many.
     """
     symbol = symbol.upper().strip()
     key = f"rec:{symbol}"
@@ -398,7 +571,39 @@ def analyst_recommendations(symbol: str) -> dict:
 @handle_errors
 def news(symbol: str) -> dict:
     """
-    Get latest news for a symbol.
+    Get latest news articles for a stock symbol.
+
+    Use this to: understand market-moving events, identify catalysts, perform sentiment analysis.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - news: Array of news article dicts, each with:
+            * title: Article headline
+            * publisher: News source
+            * link: URL to full article
+            * providerPublishTime: Unix timestamp of publication
+            * type: Article type (e.g., "STORY")
+            * thumbnail: Image URL (if available)
+
+    Example:
+        Input: news("TSLA")
+        Output: {"symbol": "TSLA",
+                 "news": [{"title": "Tesla reports record deliveries",
+                          "publisher": "Reuters",
+                          "link": "https://...",
+                          "providerPublishTime": 1701234567}, ...]}
+
+    Use Cases:
+        - Explain sudden price movements (check news when unusual volatility)
+        - Research company before investing
+        - Track ongoing stories (product launches, regulatory issues)
+        - Sentiment analysis for trading decisions
+
+    Note: News can drive short-term volatility. Combine with fundamentals for full picture.
     """
     symbol = symbol.upper().strip()
     key = f"news:{symbol}"
@@ -421,7 +626,37 @@ def news(symbol: str) -> dict:
 @handle_errors
 def financials(symbol: str) -> dict:
     """
-    Get quarterly financials: Income Statement, Balance Sheet, Cash Flow.
+    Get quarterly financial statements: Income Statement, Balance Sheet, Cash Flow.
+
+    Use this for: deep financial analysis, understanding revenue trends, evaluating cash position and debt.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - income_stmt: Quarterly income statement rows (revenue, expenses, net income, EPS, etc.)
+        - balance_sheet: Quarterly balance sheet rows (assets, liabilities, equity, cash, debt, etc.)
+        - cash_flow: Quarterly cash flow rows (operating CF, investing CF, financing CF, etc.)
+
+        Each is an array of dicts with quarterly data going back several periods.
+
+    Example:
+        Input: financials("NVDA")
+        Output: {"symbol": "NVDA",
+                 "income_stmt": [{"Total Revenue": 18120000000, "Net Income": 9243000000, ...}, ...],
+                 "balance_sheet": [{"Total Assets": 65728000000, "Total Debt": 9703000000, ...}, ...],
+                 "cash_flow": [{"Operating Cash Flow": 10438000000, ...}, ...]}
+
+    Analysis Tips:
+        - Revenue trend: Growing or declining?
+        - Profitability: Net income margins improving?
+        - Cash position: Enough cash vs debt?
+        - Cash flow: Is operating CF positive and growing?
+        - Use this with fundamentals() for complete picture
+
+    Note: Field names vary by company. Not all companies report all fields. Returns empty arrays if data unavailable.
     """
     symbol = symbol.upper().strip()
     key = f"fin:{symbol}"
@@ -451,7 +686,42 @@ def financials(symbol: str) -> dict:
 @handle_errors
 def holders(symbol: str) -> dict:
     """
-    Get major and institutional holders.
+    Get institutional and major holder ownership information.
+
+    Use this to: understand ownership structure, gauge institutional confidence, identify potential squeeze setups.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - major_holders: Summary stats array showing:
+            * % held by insiders
+            * % held by institutions
+            * % float held by institutions
+            * Number of institutions holding
+        - institutional_holders: Top institutional holders array, each with:
+            * Holder name (e.g., "Vanguard Group")
+            * Shares held
+            * Date reported
+            * % Out (percentage of total shares)
+            * Value of holdings
+
+    Example:
+        Input: holders("GME")
+        Output: {"symbol": "GME",
+                 "major_holders": [{"0": "8.72%", "1": "insidersPercentHeld"}, ...],
+                 "institutional_holders": [{"Holder": "Vanguard Group",
+                                            "Shares": 23500000, "% Out": 7.8}, ...]}
+
+    Analysis Tips:
+        - High institutional ownership (>70%) = confidence from big players
+        - Low float + high short interest = potential short squeeze
+        - Increasing institutional positions = bullish signal
+        - Track insider ownership for alignment with shareholders
+
+    Note: Data is typically updated quarterly. May not reflect very recent changes.
     """
     symbol = symbol.upper().strip()
     key = f"hold:{symbol}"
@@ -481,23 +751,254 @@ def greet(name: str) -> str:
     return f"Hello, {name}!"
 
 
+@mcp.tool()
+@handle_errors
+def dividends(symbol: str) -> dict:
+    """
+    Get historical dividends for a stock.
+
+    Use this for: dividend stock analysis, yield calculations, dividend growth tracking.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - dividends: Array of dividend payment records with:
+            * Date: Ex-dividend date
+            * Dividends: Dividend amount per share
+
+    Example:
+        Input: dividends("AAPL")
+        Output: {"symbol": "AAPL",
+                 "dividends": [{"Date": "2025-11-08", "Dividends": 0.25}, ...]}
+
+    Analysis Tips:
+        - Calculate dividend yield: (annual dividends / current price) * 100
+        - Look for consistent dividend growth (aristocrats have 25+ years)
+        - Check dividend payout ratio in fundamentals (sustainable if <60%)
+        - Compare with dividendYield in fundamentals() for current rate
+
+    Note: Returns empty if stock doesn't pay dividends. History goes back many years.
+    """
+    symbol = symbol.upper().strip()
+    key = f"div:{symbol}"
+    hit = _cache_get(key)
+    if hit:
+        return hit
+
+    t = yf.Ticker(symbol)
+    div = t.dividends
+
+    rows = _df_to_rows(div, max_rows=1000) if div is not None and not div.empty else []
+
+    out = {"symbol": symbol, "dividends": rows}
+    return _cache_set(key, out)
+
+
+@mcp.tool()
+@handle_errors
+def splits(symbol: str) -> dict:
+    """
+    Get historical stock splits.
+
+    Use this for: understanding historical price adjustments, reverse split warnings (bearish).
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - splits: Array of split records with:
+            * Date: Split date
+            * Stock Splits: Split ratio (e.g., 2.0 = 2:1 split, 0.5 = 1:2 reverse split)
+
+    Example:
+        Input: splits("AAPL")
+        Output: {"symbol": "AAPL",
+                 "splits": [{"Date": "2020-08-31", "Stock Splits": 4.0}, ...]}
+
+    Interpretation:
+        - Forward splits (ratio > 1): Often bullish, makes shares more accessible
+        - Reverse splits (ratio < 1): Often bearish, can indicate struggling company
+        - Recent splits may affect options strike prices
+
+    Note: Returns empty if no splits in history. Rare events, so usually small dataset.
+    """
+    symbol = symbol.upper().strip()
+    key = f"splits:{symbol}"
+    hit = _cache_get(key)
+    if hit:
+        return hit
+
+    t = yf.Ticker(symbol)
+    sp = t.splits
+
+    rows = _df_to_rows(sp, max_rows=100) if sp is not None and not sp.empty else []
+
+    out = {"symbol": symbol, "splits": rows}
+    return _cache_set(key, out)
+
+
+@mcp.tool()
+@handle_errors
+def actions(symbol: str) -> dict:
+    """
+    Get all corporate actions (dividends + splits combined).
+
+    Use this for: complete corporate action history in one call.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - actions: Array of action records with:
+            * Date: Action date
+            * Dividends: Dividend amount (if dividend event)
+            * Stock Splits: Split ratio (if split event)
+
+    Example:
+        Input: actions("MSFT")
+        Output: {"symbol": "MSFT",
+                 "actions": [{"Date": "2024-11-20", "Dividends": 0.75, "Stock Splits": null},
+                             {"Date": "2003-02-18", "Dividends": null, "Stock Splits": 2.0}, ...]}
+
+    Tip: This is more efficient than calling dividends() and splits() separately.
+
+    Note: Combines both event types. Check which fields are null to determine event type.
+    """
+    symbol = symbol.upper().strip()
+    key = f"actions:{symbol}"
+    hit = _cache_get(key)
+    if hit:
+        return hit
+
+    t = yf.Ticker(symbol)
+    act = t.actions
+
+    rows = _df_to_rows(act, max_rows=1500) if act is not None and not act.empty else []
+
+    out = {"symbol": symbol, "actions": rows}
+    return _cache_set(key, out)
+
+
+@mcp.tool()
+@handle_errors
+def earnings_history(symbol: str) -> dict:
+    """
+    Get historical earnings data (actual vs estimates).
+
+    Use this for: analyzing earnings beat/miss patterns, EPS trends over time.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - earnings: Array of historical earnings with quarterly data
+
+    Example:
+        Input: earnings_history("NVDA")
+        Output: {"symbol": "NVDA",
+                 "earnings": [{"quarter": "2024Q3", "actual": 5.20, "estimate": 4.98}, ...]}
+
+    Analysis Tips:
+        - Consistent beats = strong execution
+        - Pattern of beats often leads to price momentum
+        - Large misses can trigger sell-offs
+        - Use with financials() for complete picture
+
+    Note: Structure may vary. Contains quarterly EPS data going back several years.
+    """
+    symbol = symbol.upper().strip()
+    key = f"earnings_hist:{symbol}"
+    hit = _cache_get(key)
+    if hit:
+        return hit
+
+    t = yf.Ticker(symbol)
+
+    # Get earnings data - handle different possible formats
+    earnings_data = []
+    try:
+        earnings = t.earnings_dates
+        if earnings is not None and not earnings.empty:
+            earnings_data = _df_to_rows(earnings, max_rows=200)
+    except Exception:
+        pass
+
+    out = {"symbol": symbol, "earnings": earnings_data}
+    return _cache_set(key, out)
+
+
+@mcp.tool()
+@handle_errors
+def earnings_estimates(symbol: str) -> dict:
+    """
+    Get future earnings estimates from analysts.
+
+    Use this for: understanding growth expectations, forward valuations.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - estimates: Forward earnings estimates data
+
+    Example:
+        Input: earnings_estimates("TSLA")
+        Output: {"symbol": "TSLA",
+                 "estimates": {"current_quarter": {...}, "next_quarter": {...}, ...}}
+
+    Analysis Tips:
+        - Compare estimates to current earnings for expected growth
+        - Forward P/E = price / forward EPS estimate
+        - Rising estimates = bullish, falling = bearish
+        - Use with analyst_recommendations() for complete picture
+
+    Note: Format varies by source. May include quarterly and annual estimates.
+    """
+    symbol = symbol.upper().strip()
+    key = f"earnings_est:{symbol}"
+    hit = _cache_get(key)
+    if hit:
+        return hit
+
+    t = yf.Ticker(symbol)
+
+    # Try to get analyst estimates from earnings forecast
+    estimates_data = {}
+    try:
+        # Get earnings forecast/trend data if available
+        if hasattr(t, "earnings_forecasts"):
+            forecasts = t.earnings_forecasts
+            if forecasts is not None:
+                if isinstance(forecasts, pd.DataFrame):
+                    estimates_data = {"forecasts": _df_to_rows(forecasts)}
+                else:
+                    estimates_data = forecasts
+    except Exception:
+        pass
+
+    out = {"symbol": symbol, "estimates": estimates_data}
+    return _cache_set(key, out)
+
+
 if __name__ == "__main__":
     import argparse
     import os
-
-    # Environment validation
-    required_env_vars = {"MCP_CLIENT_ID": CLIENT_ID, "MCP_CLIENT_SECRET": CLIENT_SECRET}
 
     logger.info("Starting yfinance MCP server")
     logger.info(
         f"Configuration: timeout={REQUEST_TIMEOUT}s, rate_limit={RATE_LIMIT_REQUESTS}/min, cache_ttl={TTL_SECONDS}s"
     )
-
-    # Warn about default credentials
-    if CLIENT_ID == "stock-mcp-client" or CLIENT_SECRET == "super-secret-key":
-        logger.warning(
-            "⚠️  Using default credentials! Set MCP_CLIENT_ID and MCP_CLIENT_SECRET environment variables for production."
-        )
 
     parser = argparse.ArgumentParser(description="yfinance MCP Server")
     parser.add_argument(
@@ -524,6 +1025,7 @@ if __name__ == "__main__":
         # Use http transport - mcp.run() doesn't accept host/port
         # PORT env var is used by FastMCP internally
         mcp.run(transport="http", host="0.0.0.0", port=port)
+
 
 # middleware = [
 #     Middleware(
