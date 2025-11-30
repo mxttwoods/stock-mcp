@@ -440,6 +440,12 @@ def fundamentals(symbol: str) -> dict:
         "earningsGrowth",
         "beta",
         "dividendYield",
+        "debtToEquity",
+        "currentRatio",
+        "returnOnEquity",
+        "totalCash",
+        "totalDebt",
+        "quickRatio",
     ]
     out = {
         "symbol": symbol,
@@ -792,7 +798,12 @@ def dividends(symbol: str) -> dict:
     t = yf.Ticker(symbol)
     div = t.dividends
 
-    rows = _df_to_rows(div, max_rows=1000) if div is not None and not div.empty else []
+    if div is not None and not div.empty:
+        # Convert Series to DataFrame properly
+        div_df = div.reset_index()
+        rows = _df_to_rows(div_df, max_rows=1000)
+    else:
+        rows = []
 
     out = {"symbol": symbol, "dividends": rows}
     return _cache_set(key, out)
@@ -837,7 +848,11 @@ def splits(symbol: str) -> dict:
     t = yf.Ticker(symbol)
     sp = t.splits
 
-    rows = _df_to_rows(sp, max_rows=100) if sp is not None and not sp.empty else []
+    if sp is not None and not sp.empty:
+        sp_df = sp.reset_index()
+        rows = _df_to_rows(sp_df, max_rows=100)
+    else:
+        rows = []
 
     out = {"symbol": symbol, "splits": rows}
     return _cache_set(key, out)
@@ -881,7 +896,11 @@ def actions(symbol: str) -> dict:
     t = yf.Ticker(symbol)
     act = t.actions
 
-    rows = _df_to_rows(act, max_rows=1500) if act is not None and not act.empty else []
+    if act is not None and not act.empty:
+        act_df = act.reset_index()
+        rows = _df_to_rows(act_df, max_rows=1500)
+    else:
+        rows = []
 
     out = {"symbol": symbol, "actions": rows}
     return _cache_set(key, out)

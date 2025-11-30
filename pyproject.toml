@@ -8,6 +8,7 @@ dependencies = [
     "fastmcp>=2.13.1",
     "mcp",
     "numpy",
+    "openai-agents>=0.6.1",
     "pandas",
     "ruff",
     "uvicorn",
