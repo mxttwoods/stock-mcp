@@ -8,6 +8,7 @@ from typing import Any, Optional
 from functools import wraps
 
 import yfinance as yf
+from yfinance import Sector, Industry, screen, EquityQuery
 import pandas as pd
 
 from fastmcp import FastMCP, Context
@@ -989,6 +990,705 @@ def earnings_estimates(symbol: str) -> dict:
 
     out = {"symbol": symbol, "estimates": estimates_data}
     return _cache_set(key, out)
+
+
+# Sector & Industry Tools
+@mcp.tool()
+@handle_errors
+def get_sector_overview(sector_key: str) -> dict:
+    """
+    Get comprehensive sector information including top companies, ETFs, and industries.
+
+    Use this for: sector rotation strategies, finding sector leaders, exploring investment themes.
+
+    Args:
+        sector_key: Sector identifier. Common sectors:
+            - "technology" - Tech companies
+            - "healthcare" - Healthcare & pharma
+            - "financial-services" - Banks, insurance, investment firms
+            - "consumer-cyclical" - Retail, automotive, leisure
+            - "industrials" - Manufacturing, aerospace, defense
+            - "energy" - Oil, gas, renewable energy
+            - "utilities" - Electric, water, gas utilities
+            - "real-estate" - REITs and real estate
+            - "basic-materials" - Mining, chemicals, metals
+            - "consumer-defensive" - Food, beverages, household products
+            - "communication-services" - Telecom, media, entertainment
+
+    Returns:
+        dict with:
+        - sector_key: The sector identifier
+        - name: Sector display name
+        - symbol: Sector index symbol (if available)
+        - overview: Sector description
+        - top_companies: Array of leading companies in sector (symbol, name, market cap, weight)
+        - top_etfs: Top sector ETFs
+        - top_mutual_funds: Top sector mutual funds
+        - industries: List of industries within this sector
+
+    Example:
+        Input: get_sector_overview("technology")
+        Output: {"sector_key": "technology", "name": "Technology",
+                 "top_companies": [{"symbol": "AAPL", "name": "Apple Inc.", ...}, ...],
+                 "industries": ["software-infrastructure", "semiconductors", ...]}
+
+    Strategy Tips:
+        - Compare sector performance to identify rotation opportunities
+        - Use top_companies for sector-based stock picking
+        - Check industries list for sub-sector specialization
+        - Top ETFs provide easy sector exposure
+
+    Note: Some sectors may have limited data. Check if fields are None.
+    """
+    sector_key = sector_key.lower().strip()
+    cache_key = f"sector:{sector_key}"
+    hit = _cache_get(cache_key)
+    if hit:
+        return hit
+
+    try:
+        sector = Sector(sector_key)
+
+        # Get all available sector data
+        out = {
+            "sector_key": sector_key,
+            "name": getattr(sector, "name", None),
+            "symbol": getattr(sector, "symbol", None),
+            "overview": getattr(sector, "overview", None),
+        }
+
+        # Top companies
+        try:
+            top_cos = sector.top_companies
+            if top_cos is not None and not top_cos.empty:
+                out["top_companies"] = _df_to_rows(top_cos, max_rows=50)
+            else:
+                out["top_companies"] = []
+        except Exception:
+            out["top_companies"] = []
+
+        # Top ETFs
+        try:
+            top_etfs = sector.top_etfs
+            if top_etfs is not None and not top_etfs.empty:
+                out["top_etfs"] = _df_to_rows(top_etfs, max_rows=20)
+            else:
+                out["top_etfs"] = []
+        except Exception:
+            out["top_etfs"] = []
+
+        # Top mutual funds
+        try:
+            top_mf = sector.top_mutual_funds
+            if top_mf is not None and not top_mf.empty:
+                out["top_mutual_funds"] = _df_to_rows(top_mf, max_rows=20)
+            else:
+                out["top_mutual_funds"] = []
+        except Exception:
+            out["top_mutual_funds"] = []
+
+        # Industries list
+        try:
+            industries = sector.industries
+            if isinstance(industries, dict):
+                out["industries"] = list(industries.keys())
+            elif isinstance(industries, list):
+                out["industries"] = industries
+            else:
+                out["industries"] = []
+        except Exception:
+            out["industries"] = []
+
+        # Cache for 1 hour (sector data doesn't change often)
+        return _cache_set(cache_key, out)
+
+    except Exception as e:
+        logger.error(f"Error fetching sector {sector_key}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid sector key or data unavailable: {str(e)}",
+        )
+
+
+@mcp.tool()
+@handle_errors
+def get_industry_overview(industry_key: str) -> dict:
+    """
+    Get industry-specific data including top performing and growth companies.
+
+    Use this for: finding industry leaders, growth stock discovery, competitive analysis.
+
+    Args:
+        industry_key: Industry identifier. Examples:
+            - "software-infrastructure" - Cloud, enterprise software
+            - "semiconductors" - Chip manufacturers
+            - "biotechnology" - Biotech & life sciences
+            - "drug-manufacturers-general" - Big pharma
+            - "banks-regional" - Regional banks
+            - "oil-gas-exploration" - E&P companies
+            - "solar" - Solar energy companies
+            (Use get_sector_overview to see all industries in a sector)
+
+    Returns:
+        dict with:
+        - industry_key: The industry identifier
+        - name: Industry display name
+        - sector_key: Parent sector
+        - sector_name: Parent sector name
+        - overview: Industry description
+        - top_companies: Leading companies by market cap
+        - top_performing_companies: Best recent performers
+        - top_growth_companies: Highest growth companies
+
+    Example:
+        Input: get_industry_overview("software-infrastructure")
+        Output: {"industry_key": "software-infrastructure",
+                 "name": "Software - Infrastructure",
+                 "sector_key": "technology",
+                 "top_companies": [{"symbol": "MSFT", ...}, ...]}
+
+    Strategy Tips:
+        - Compare top_performing vs top_growth to find momentum
+        - Use for picking best-of-breed in an industry
+        - Cross-reference with sector trends
+        - Check overview for industry-specific dynamics
+
+    Note: Some industries may have sparse data. Check for None/empty arrays.
+    """
+    industry_key = industry_key.lower().strip()
+    cache_key = f"industry:{industry_key}"
+    hit = _cache_get(cache_key)
+    if hit:
+        return hit
+
+    try:
+        industry = Industry(industry_key)
+
+        out = {
+            "industry_key": industry_key,
+            "name": getattr(industry, "name", None),
+            "sector_key": getattr(industry, "sector_key", None),
+            "sector_name": getattr(industry, "sector_name", None),
+            "overview": getattr(industry, "overview", None),
+        }
+
+        # Top companies
+        try:
+            top_cos = industry.top_companies
+            if top_cos is not None and not top_cos.empty:
+                out["top_companies"] = _df_to_rows(top_cos, max_rows=50)
+            else:
+                out["top_companies"] = []
+        except Exception:
+            out["top_companies"] = []
+
+        # Top performing
+        try:
+            top_perf = industry.top_performing_companies
+            if top_perf is not None and not top_perf.empty:
+                out["top_performing_companies"] = _df_to_rows(top_perf, max_rows=30)
+            else:
+                out["top_performing_companies"] = []
+        except Exception:
+            out["top_performing_companies"] = []
+
+        # Top growth
+        try:
+            top_growth = industry.top_growth_companies
+            if top_growth is not None and not top_growth.empty:
+                out["top_growth_companies"] = _df_to_rows(top_growth, max_rows=30)
+            else:
+                out["top_growth_companies"] = []
+        except Exception:
+            out["top_growth_companies"] = []
+
+        return _cache_set(cache_key, out)
+
+    except Exception as e:
+        logger.error(f"Error fetching industry {industry_key}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid industry key or data unavailable: {str(e)}",
+        )
+
+
+# Stock Screening Tools
+@mcp.tool()
+@handle_errors
+def screen_stocks(
+    region: str = "us",
+    sector: str = None,
+    industry: str = None,
+    exchange: str = None,
+    limit: int = 25,
+) -> dict:
+    """
+    Screen stocks by criteria to discover investment opportunities.
+
+    Use this for: stock discovery, building watchlists, finding stocks matching criteria.
+
+    Args:
+        region: Geographic region. Options: "us", "br", "au",  "ca", "fr", "de", "hk", "in", etc.
+        sector: Sector filter (use sector keys from get_sector_overview)
+        industry: Industry filter (use industry keys from get_industry_overview)
+        exchange: Exchange filter. Examples: "nas" (NASDAQ), "nyse", "amex"
+        limit: Max results to return (1-250, default: 25)
+
+    Returns:
+        dict with:
+        - criteria: The search criteria used
+        - count: Number of results found
+        - results: Array of matching stocks with:
+            * symbol: Ticker symbol
+            * name: Company name
+            * exchange: Stock exchange
+            * Additional fields vary by result
+
+    Example:
+        Input: screen_stocks(region="us", sector="technology", limit=10)
+        Output: {"criteria": {"region": "us", "sector": "technology"},
+                 "count": 10,
+                 "results": [{"symbol": "AAPL", "name": "Apple Inc.", ...}, ...]}
+
+    Common Screening Strategies:
+        1. Sector plays: screen_stocks(region="us", sector="energy")
+        2. Industry focus: screen_stocks(region="us", industry="semiconductors")
+        3. Exchange-specific: screen_stocks(region="us", exchange="nyse")
+        4. Combination: screen_stocks(region="us", sector="healthcare", exchange="nas")
+
+    Note: Results limited to 250. Refine criteria if hitting limit. Some combinations may return few/no results.
+    """
+    # Build query
+    filters = []
+    criteria_dict = {"region": region}
+
+    if region:
+        filters.append(EquityQuery("eq", ["region", region]))
+
+    if sector:
+        filters.append(EquityQuery("eq", ["sector", sector.lower()]))
+        criteria_dict["sector"] = sector
+
+    if industry:
+        filters.append(EquityQuery("eq", ["industry", industry.lower()]))
+        criteria_dict["industry"] = industry
+
+    if exchange:
+        filters.append(EquityQuery("eq", ["exchange", exchange.lower()]))
+        criteria_dict["exchange"] = exchange
+
+    # Combine filters with AND
+    if len(filters) > 1:
+        query = filters[0]
+        for f in filters[1:]:
+            query = query & f
+    else:
+        query = filters[0] if filters else EquityQuery("eq", ["region", region])
+
+    cache_key = f"screen:{region}:{sector}:{industry}:{exchange}:{limit}"
+    hit = _cache_get(cache_key)
+    if hit:
+        return hit
+
+    try:
+        # Run screen
+        results = screen(query, size=min(limit, 250))
+
+        # Convert to list of dicts
+        results_list = []
+        if results is not None and not results.empty:
+            results_list = _df_to_rows(results, max_rows=limit)
+
+        out = {
+            "criteria": criteria_dict,
+            "count": len(results_list),
+            "results": results_list,
+        }
+
+        return _cache_set(cache_key, out)
+
+    except Exception as e:
+        logger.error(f"Screening error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Screening failed: {str(e)}",
+        )
+
+
+@mcp.tool()
+@handle_errors
+def screen_predefined(screener_name: str) -> dict:
+    """
+    Use Yahoo Finance predefined stock screeners for quick market insights.
+
+    Use this for: finding hot stocks, market movers, identifying opportunities/risks.
+
+    Args:
+        screener_name: Predefined screener. Options:
+            - "most_actives" - Highest volume stocks
+            - "day_gainers" - Biggest percentage gainers today
+            - "day_losers" - Biggest percentage losers today
+            - "growth_technology_stocks" - Tech growth stocks
+            - "aggressive_small_caps" - High risk small cap stocks
+            - "small_cap_gainers" - Small cap stocks gaining today
+            - "undervalued_large_caps" - Value large caps
+            - "undervalued_growth_stocks" - Growth at reasonable price
+            - "conservative_foreign_funds" - Conservative international funds
+            - "high_yield_bond" - High yield bond funds
+
+    Returns:
+        dict with:
+        - screener: The screener name used
+        - count: Number of results
+        - results: Array of stocks with symbol, name, price, change%, volume, etc.
+
+    Example:
+        Input: screen_predefined("day_gainers")
+        Output: {"screener": "day_gainers",
+                 "count": 25,
+                 "results": [{"symbol": "XYZ", "name": "XYZ Corp",
+                             "regularMarketChangePercent": 15.2, ...}, ...]}
+
+    Trading Strategies:
+        - day_gainers: Momentum trading, identify breakouts
+        - day_losers: Contrarian plays, dip buying opportunities
+        - most_actives: High liquidity for day trading
+        - growth_technology_stocks: Long-term tech exposure
+        - undervalued_large_caps: Value investing ideas
+
+    Note: Predefined screeners return ~25-100 results. Data updates throughout trading day.
+    """
+    screener_name = screener_name.lower().strip()
+    cache_key = f"screen_pre:{screener_name}"
+    hit = _cache_get(cache_key)
+    if hit:
+        return hit
+
+    try:
+        # Use predefined screener
+        results = screen(screener_name)
+
+        results_list = []
+        if results is not None and not results.empty:
+            results_list = _df_to_rows(results, max_rows=250)
+
+        out = {
+            "screener": screener_name,
+            "count": len(results_list),
+            "results": results_list,
+        }
+
+        return _cache_set(cache_key, out)
+
+    except Exception as e:
+        logger.error(f"Predefined screener error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid screener name or data unavailable: {str(e)}",
+        )
+
+
+# Enhanced Ticker Analysis
+@mcp.tool()
+@handle_errors
+def get_upgrades_downgrades(symbol: str) -> dict:
+    """
+    Get recent analyst rating changes (upgrades and downgrades).
+
+    Use this for: tracking sentiment changes, identifying catalysts, confirming trends.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - upgrades_downgrades: Array of rating changes with:
+            * GradeDate: Date of rating change
+            * Firm: Analyst firm name
+            * Action: "up", "down", "init", "main", "reit"
+            * FromGrade: Previous rating
+            * ToGrade: New rating
+
+    Example:
+        Input: get_upgrades_downgrades("NVDA")
+        Output: {"symbol": "NVDA",
+                 "upgrades_downgrades": [
+                     {"GradeDate": "2025-11-28", "Firm": "Goldman Sachs",
+                      "Action": "up", "FromGrade": "Neutral", "ToGrade": "Buy"},
+                     ...
+                 ]}
+
+    Interpretation:
+        - Multiple upgrades = Building bullish consensus
+        - Downgrades after rally = Potential reversal warning
+        - Upgrade from major firms (Goldman, Morgan Stanley) = Strong signal
+        - "init" = Initial coverage (new analyst following)
+        - "main" = Maintained rating
+        - "reit" = Reiterated rating
+
+    Trading Signals:
+        - Upgrade cluster often precedes price moves
+        - Downgrade after earnings = Reassessment of outlook
+        - Track which firms are consistently right
+
+    Note: Returns recent history (typically last ~2 years). May be empty if no recent changes.
+    """
+    symbol = symbol.upper().strip()
+    cache_key = f"upgrades:{symbol}"
+    hit = _cache_get(cache_key)
+    if hit:
+        return hit
+
+    t = yf.Ticker(symbol)
+
+    try:
+        upgrades = t.upgrades_downgrades
+        if upgrades is not None and not upgrades.empty:
+            rows = _df_to_rows(upgrades, max_rows=500)
+        else:
+            rows = []
+
+        out = {"symbol": symbol, "upgrades_downgrades": rows}
+
+        return _cache_set(cache_key, out)
+
+    except Exception:
+        # Return empty if not available
+        return {"symbol": symbol, "upgrades_downgrades": []}
+
+
+@mcp.tool()
+@handle_errors
+def get_insider_transactions(symbol: str) -> dict:
+    """
+    Get insider buying and selling activity.
+
+    Use this for: gauging insider confidence, identifying potential catalysts, risk assessment.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - insider_transactions: Array of transactions with:
+            * Date: Transaction date (recent first)
+            * Insider: Name and title of insider
+            * Transaction: "Buy", "Sale", "Option Exercise", etc.
+            * Shares: Number of shares
+            * Value: Dollar value of transaction
+            * Shares Owned: Total shares owned after transaction
+
+    Example:
+        Input: get_insider_transactions("TSLA")
+        Output: {"symbol": "TSLA",
+                 "insider_transactions": [
+                     {"Date": "2025-11-15", "Insider": "Elon Musk - CEO",
+                      "Transaction": "Sale", "Shares": 500000, "Value": 125000000,
+                      "Shares Owned": 238000000},
+                     ...
+                 ]}
+
+    Interpretation:
+        - Insider buying = Strong bullish signal (putting own money in)
+        - Insider selling = Often routine (diversification, taxes, estate planning)
+        - Multiple insiders buying = Very bullish
+        - C-level executives buying = Strongest signal
+        - Director buying after price drop = Potential bottom
+        - Heavy selling before earnings = Potential warning
+
+    Red Flags:
+        - Clustered selling by multiple insiders
+        - CEO selling large stakes
+        - Selling by directors/board members
+
+    Green Flags:
+        - Any insider buying (especially CFO/CEO)
+        - Buying during blackout window exceptions
+        - Form 4 filings with open market purchases
+
+    Note: Regulated insider trades only (officers, directors, 10%+ holders). Delayed reporting (usually 2 days).
+    """
+    symbol = symbol.upper().strip()
+    cache_key = f"insider:{symbol}"
+    hit = _cache_get(cache_key)
+    if hit:
+        return hit
+
+    t = yf.Ticker(symbol)
+
+    try:
+        insider_trans = t.insider_transactions
+        if insider_trans is not None and not insider_trans.empty:
+            rows = _df_to_rows(insider_trans, max_rows=500)
+        else:
+            rows = []
+
+        out = {"symbol": symbol, "insider_transactions": rows}
+
+        return _cache_set(cache_key, out)
+
+    except Exception:
+        return {"symbol": symbol, "insider_transactions": []}
+
+
+@mcp.tool()
+@handle_errors
+def get_insider_roster(symbol: str) -> dict:
+    """
+    Get current insider ownership roster.
+
+    Use this for: understanding ownership structure, tracking key stakeholders.
+
+    Args:
+        symbol: Stock ticker symbol
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - insider_roster: Array of insiders with:
+            * Name: Insider name
+            * Position: Title/role
+            * Shares Owned: Current share ownership
+            * Date: As of date
+
+    Example:
+        Input: get_insider_roster("AAPL")
+        Output: {"symbol": "AAPL",
+                 "insider_roster": [
+                     {"Name": "Tim Cook", "Position": "CEO",
+                      "Shares Owned": 3200000, "Date": "2025-10-31"},
+                     ...
+                 ]}
+
+    Use Cases:
+        - Verify management has skin in the game
+        - Track ownership changes over time
+        - Compare with total shares outstanding
+        - Identify key decision makers
+
+    Note: Filed quarterly. May not reflect very recent changes.
+    """
+    symbol = symbol.upper().strip()
+    cache_key = f"insider_roster:{symbol}"
+    hit = _cache_get(cache_key)
+    if hit:
+        return hit
+
+    t = yf.Ticker(symbol)
+
+    try:
+        roster = t.insider_roster_holders
+        if roster is not None and not roster.empty:
+            rows = _df_to_rows(roster, max_rows=100)
+        else:
+            rows = []
+
+        out = {"symbol": symbol, "insider_roster": rows}
+
+        return _cache_set(cache_key, out)
+
+    except Exception:
+        return {"symbol": symbol, "insider_roster": []}
+
+
+# Multi-Ticker Operations
+@mcp.tool()
+@handle_errors
+def download_batch(
+    symbols: list[str], period: str = "1mo", interval: str = "1d"
+) -> dict:
+    """
+    Download historical data for multiple tickers at once (more efficient than individual calls).
+
+    Use this for: portfolio analysis, comparing multiple stocks, backtesting strategies.
+
+    Args:
+        symbols: List of ticker symbols (e.g., ["AAPL", "MSFT", "GOOGL"])
+        period: Time range (same as history tool): "5d", "1mo", "3mo", "6mo", "1y", "5y", "max"
+        interval: Data frequency: "1d", "1wk", "1mo" (intraday: "1m", "5m", "15m", "60m")
+
+    Returns:
+        dict with:
+        - symbols: List of requested symbols
+        - period, interval: Parameters used
+        - data: Dict mapping each symbol to its history data:
+            * Each symbol key contains array of OHLCV rows
+            * Missing/invalid symbols will have empty arrays
+
+    Example:
+        Input: download_batch(["AAPL", "MSFT"], period="5d", interval="1d")
+        Output: {"symbols": ["AAPL", "MSFT"],
+                 "period": "5d",
+                 "interval": "1d",
+                 "data": {
+                     "AAPL": [{"Date": "2025-11-25", "Open": 189.5, ...}, ...],
+                     "MSFT": [{"Date": "2025-11-25", "Open": 378.2, ...}, ...]
+                 }}
+
+    Efficiency:
+        - 10x faster than calling history() 10 times
+        - Single API call to Yahoo Finance
+        - Automatic alignment of dates
+
+    Use Cases:
+        - Portfolio tracking across multiple holdings
+        - Sector comparison (get all tech stocks)
+        - Correlation analysis
+        - Pairs trading research
+
+    Note: Max ~10 symbols recommended for performance. Results may vary by symbol (some may fail).
+    """
+    symbols_upper = [s.upper().strip() for s in symbols]
+    cache_key = f"batch:{','.join(sorted(symbols_upper))}:{period}:{interval}"
+    hit = _cache_get(cache_key)
+    if hit:
+        return hit
+
+    try:
+        # Use yf.download for batch download
+        data = yf.download(
+            symbols_upper,
+            period=period,
+            interval=interval,
+            group_by="ticker",
+            progress=False,
+        )
+
+        # Parse results per symbol
+        results = {}
+        for symbol in symbols_upper:
+            try:
+                if len(symbols_upper) == 1:
+                    # Single ticker - data is not grouped
+                    symbol_data = data
+                else:
+                    # Multiple tickers - data is grouped by ticker
+                    symbol_data = data[symbol]
+
+                if symbol_data is not None and not symbol_data.empty:
+                    results[symbol] = _df_to_rows(symbol_data, max_rows=5000)
+                else:
+                    results[symbol] = []
+            except Exception:
+                results[symbol] = []
+
+        out = {
+            "symbols": symbols_upper,
+            "period": period,
+            "interval": interval,
+            "data": results,
+        }
+
+        return _cache_set(cache_key, out)
+
+    except Exception as e:
+        logger.error(f"Batch download error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Batch download failed: {str(e)}",
+        )
 
 
 if __name__ == "__main__":

@@ -284,6 +284,10 @@ async def run_all_tests():
     results["dividends"] = await test_dividends_and_splits(args.symbol)
     results["earnings"] = await test_earnings(args.symbol)
     results["news"] = await test_news_and_calendar(args.symbol)
+    results["sector_industry"] = await test_sector_industry()
+    results["screening"] = await test_screening()
+    results["insider"] = await test_insider_upgrades(args.symbol)
+    results["batch"] = await test_batch_operations()
 
     # Summary
     print("\n" + "=" * 60)
@@ -300,6 +304,139 @@ async def run_all_tests():
     else:
         print("\n⚠️  Some tests failed. Check output above.")
         return 1
+
+
+async def test_sector_industry():
+    """Test sector and industry exploration."""
+    print("\n" + "=" * 60)
+    print("TEST: Sector & Industry Exploration")
+    print("=" * 60)
+
+    async with client:
+        try:
+            # Test sector overview
+            sector_result = await client.call_tool(
+                "get_sector_overview", {"sector_key": "technology"}
+            )
+            sector_data = parse_result(sector_result)
+            print(f"✅ Sector Overview: {sector_data.get('name', 'N/A')}")
+            print(f"  🏢 Top companies: {len(sector_data.get('top_companies', []))}")
+            print(f"  🏭 Industries: {len(sector_data.get('industries', []))}")
+
+            # Test industry overview (use first industry from sector if available)
+            industries = sector_data.get("industries", [])
+            if industries:
+                industry_key = industries[0]
+                industry_result = await client.call_tool(
+                    "get_industry_overview", {"industry_key": industry_key}
+                )
+                industry_data = parse_result(industry_result)
+                print(f"✅ Industry Overview: {industry_data.get('name', 'N/A')}")
+                print(
+                    f"  📊 Top companies: {len(industry_data.get('top_companies', []))}"
+                )
+
+            return True
+        except Exception as e:
+            print(f"❌ Sector/Industry test failed: {e}")
+            return False
+
+
+async def test_screening():
+    """Test stock screening features."""
+    print("\n" + "=" * 60)
+    print("TEST: Stock Screening")
+    print("=" * 60)
+
+    async with client:
+        try:
+            # Test custom screening
+            screen_result = await client.call_tool(
+                "screen_stocks", {"region": "us", "sector": "technology", "limit": 10}
+            )
+            screen_data = parse_result(screen_result)
+            print(f"✅ Custom Screen: {screen_data.get('count', 0)} results")
+
+            # Test predefined screener
+            pred_result = await client.call_tool(
+                "screen_predefined", {"screener_name": "most_actives"}
+            )
+            pred_data = parse_result(pred_result)
+            print(
+                f"✅ Predefined Screen: {pred_data.get('count', 0)} most active stocks"
+            )
+
+            return True
+        except Exception as e:
+            print(f"❌ Screening test failed: {e}")
+            return False
+
+
+async def test_insider_upgrades(symbol: str):
+    """Test insider transactions and upgrades/downgrades."""
+    print("\n" + "=" * 60)
+    print(f"TEST: Insider & Analyst Data for {symbol}")
+    print("=" * 60)
+
+    async with client:
+        try:
+            # Test upgrades/downgrades
+            upgrades_result = await client.call_tool(
+                "get_upgrades_downgrades", {"symbol": symbol}
+            )
+            upgrades_data = parse_result(upgrades_result)
+            upgrades = upgrades_data.get("upgrades_downgrades", [])
+            print(f"✅ Upgrades/Downgrades: {len(upgrades)} rating changes")
+
+            # Test insider transactions
+            insider_result = await client.call_tool(
+                "get_insider_transactions", {"symbol": symbol}
+            )
+            insider_data = parse_result(insider_result)
+            transactions = insider_data.get("insider_transactions", [])
+            print(f"✅ Insider Transactions: {len(transactions)} recent trades")
+
+            # Test insider roster
+            roster_result = await client.call_tool(
+                "get_insider_roster", {"symbol": symbol}
+            )
+            roster_data = parse_result(roster_result)
+            roster = roster_data.get("insider_roster", [])
+            print(f"✅ Insider Roster: {len(roster)} insiders")
+
+            return True
+        except Exception as e:
+            print(f"❌ Insider/Upgrades test failed: {e}")
+            return False
+
+
+async def test_batch_operations():
+    """Test batch download functionality."""
+    print("\n" + "=" * 60)
+    print("TEST: Batch Operations")
+    print("=" * 60)
+
+    async with client:
+        try:
+            # Test batch download
+            batch_result = await client.call_tool(
+                "download_batch",
+                {
+                    "symbols": ["AAPL", "MSFT", "GOOGL"],
+                    "period": "5d",
+                    "interval": "1d",
+                },
+            )
+            batch_data = parse_result(batch_result)
+            data_dict = batch_data.get("data", {})
+            print(f"✅ Batch Download: {len(data_dict)} symbols")
+            for sym, history in data_dict.items():
+                print(f"  📊 {sym}: {len(history)} data points")
+
+            return True
+        except Exception as e:
+            print(f"❌ Batch operations test failed: {e}")
+            return False
 
 
 if __name__ == "__main__":
