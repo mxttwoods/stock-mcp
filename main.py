@@ -29,8 +29,7 @@ mcp = FastMCP(
 )
 
 # ---- Configuration ----
-REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))  # seconds
-RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "100"))  # per minute
+# Cache TTL for reducing API rate limits
 
 
 def handle_errors(func):
@@ -116,8 +115,6 @@ async def health_check(request):
             "timestamp": time.time(),
             "cache_size": len(_CACHE),
             "config": {
-                "timeout": REQUEST_TIMEOUT,
-                "rate_limit": RATE_LIMIT_REQUESTS,
                 "cache_ttl": TTL_SECONDS,
             },
         }
@@ -446,6 +443,19 @@ def fundamentals(symbol: str) -> dict:
         "totalCash",
         "totalDebt",
         "quickRatio",
+        # Additional useful metrics
+        "pegRatio",
+        "priceToBook",
+        "enterpriseValue",
+        "freeCashflow",
+        "operatingCashflow",
+        "fiftyTwoWeekHigh",
+        "fiftyTwoWeekLow",
+        "revenue",
+        "revenuePerShare",
+        "shortRatio",
+        "sharesShort",
+        "sharesOutstanding",
     ]
     out = {
         "symbol": symbol,
@@ -753,11 +763,6 @@ def holders(symbol: str) -> dict:
     return _cache_set(key, out)
 
 
-@mcp.tool
-def greet(name: str) -> str:
-    return f"Hello, {name}!"
-
-
 @mcp.tool()
 @handle_errors
 def dividends(symbol: str) -> dict:
@@ -1038,6 +1043,1022 @@ def sharpe_ratio(
         "days_analyzed": len(daily_returns),
     }
     return _cache_set(key, out)
+
+
+@mcp.tool()
+@handle_errors
+def beta(
+    symbol: str,
+    benchmark: str = "SPY",
+    period: str = "3y",
+) -> dict:
+    """
+    Calculate beta (systematic risk) for a stock vs a benchmark.
+
+    Beta measures how much a stock moves relative to the market.
+    Use this to understand a stock's sensitivity to market movements.
+
+    Args:
+        symbol: Stock ticker symbol
+        benchmark: Benchmark ticker (default: "SPY" for S&P 500)
+        period: Time period for calculation
+            - "1y", "2y", "3y", "5y": Long-term analysis
+            Default: "3y" (industry standard)
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - benchmark: Benchmark ticker used
+        - period: Time period
+        - beta: Beta coefficient
+        - correlation: Correlation with benchmark
+        - r_squared: R² (coefficient of determination)
+        - alpha: Annualized alpha (excess return)
+        - symbol_volatility: Stock's annualized volatility (%)
+        - benchmark_volatility: Benchmark's annualized volatility (%)
+        - days_analyzed: Number of trading days
+
+    Example:
+        Input: beta("AAPL", benchmark="SPY", period="3y")
+        Output: {"symbol": "AAPL", "benchmark": "SPY",
+                 "beta": 1.15, "correlation": 0.78,
+                 "alpha": 5.2, ...}
+
+    Interpretation:
+        - Beta = 1.0: Moves with market
+        - Beta > 1.0: More volatile than market (amplifies moves)
+        - Beta < 1.0: Less volatile than market (dampens moves)
+        - Beta < 0: Moves opposite to market (rare)
+        - High R²: Beta is reliable predictor
+        - Positive alpha: Outperforming benchmark
+
+    Note: 3-year period is standard for beta calculation. Data cached for 20 seconds.
+    """
+    symbol = symbol.upper().strip()
+    benchmark = benchmark.upper().strip()
+    key = f"beta:{symbol}:{benchmark}:{period}"
+    hit = _cache_get(key)
+    if hit:
+        return hit
+
+    # Download data for both
+    ticker_data = yf.download([symbol, benchmark], period=period, progress=False)
+
+    if ticker_data.empty or "Close" not in ticker_data:
+        return {
+            "symbol": symbol,
+            "benchmark": benchmark,
+            "period": period,
+            "error": "Insufficient data to calculate beta",
+        }
+
+    # Extract close prices
+    try:
+        if isinstance(ticker_data.columns, pd.MultiIndex):
+            stock_prices = ticker_data["Close"][symbol]
+            bench_prices = ticker_data["Close"][benchmark]
+        else:
+            stock_prices = ticker_data["Close"]
+            bench_prices = ticker_data["Close"]
+    except Exception:
+        return {
+            "symbol": symbol,
+            "benchmark": benchmark,
+            "period": period,
+            "error": "Error extracting price data",
+        }
+
+    # Calculate returns
+    stock_returns = stock_prices.pct_change().dropna()
+    bench_returns = bench_prices.pct_change().dropna()
+
+    # Align data
+    combined = pd.DataFrame({"stock": stock_returns, "bench": bench_returns}).dropna()
+
+    if len(combined) < 20:
+        return {
+            "symbol": symbol,
+            "benchmark": benchmark,
+            "period": period,
+            "error": "Insufficient aligned data points",
+        }
+
+    # Calculate beta using covariance
+    covariance = float(np.cov(combined["stock"], combined["bench"])[0][1])
+    bench_variance = float(np.var(combined["bench"], ddof=1))
+
+    if bench_variance == 0:
+        beta_val = None
+    else:
+        beta_val = covariance / bench_variance
+
+    # Calculate correlation and R²
+    correlation = float(np.corrcoef(combined["stock"], combined["bench"])[0][1])
+    r_squared = correlation**2
+
+    # Calculate alpha (annualized)
+    stock_annual_return = float(np.mean(combined["stock"]) * 252)
+    bench_annual_return = float(np.mean(combined["bench"]) * 252)
+    alpha = stock_annual_return - (beta_val * bench_annual_return if beta_val else 0)
+
+    # Calculate volatilities
+    stock_vol = float(np.std(combined["stock"], ddof=1) * np.sqrt(252))
+    bench_vol = float(np.std(combined["bench"], ddof=1) * np.sqrt(252))
+
+    out = {
+        "symbol": symbol,
+        "benchmark": benchmark,
+        "period": period,
+        "beta": round(beta_val, 3) if beta_val is not None else None,
+        "correlation": round(correlation, 3),
+        "r_squared": round(r_squared, 3),
+        "alpha": round(alpha * 100, 2),  # Convert to %
+        "symbol_volatility": round(stock_vol * 100, 2),  # Convert to %
+        "benchmark_volatility": round(bench_vol * 100, 2),  # Convert to %
+        "days_analyzed": len(combined),
+    }
+    return _cache_set(key, out)
+
+
+@mcp.tool()
+@handle_errors
+def max_drawdown(
+    symbol: str,
+    period: str = "1y",
+) -> dict:
+    """
+    Calculate maximum drawdown - the largest peak-to-trough decline.
+
+    Max drawdown measures the worst loss from a peak. Key risk metric for understanding
+    downside risk and portfolio resilience.
+
+    Use this for: risk assessment, comparing downside protection, stress testing.
+
+    Args:
+        symbol: Stock ticker symbol
+        period: Time period. Examples:
+            - "6mo", "1y": Recent performance
+            - "3y", "5y", "max": Long-term analysis
+            Default: "1y"
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - period: Time period
+        - max_drawdown: Maximum drawdown percentage (negative)
+        - max_drawdown_duration: Days from peak to trough
+        - recovery_duration: Days from trough to recovery (None if not recovered)
+        - peak_date: Date of peak before max drawdown
+        - trough_date: Date of trough
+        - recovery_date: Date back to peak (None if not recovered)
+        - current_drawdown: Current drawdown from all-time high (negative)
+        - is_recovered: Boolean - has it recovered from max drawdown
+
+    Example:
+        Input: max_drawdown("AAPL", period="1y")
+        Output: {"symbol": "AAPL", "max_drawdown": -15.3,
+                 "current_drawdown": -5.2, "is_recovered": true, ...}
+
+    Interpretation:
+        - Lower drawdown = better downside protection
+        - Longer recovery = worse risk characteristics
+        - Compare across stocks for risk comparison
+        - Max drawdown < -20%: High volatility stock
+        - Max drawdown > -10%: Lower volatility, defensive
+
+    Analysis Tips:
+        - Compare with volatility - low volatility + low drawdown = defensive
+        - Check recovery time - faster recovery = resilient
+        - Use with beta() and sharpe_ratio() for complete risk picture
+
+    Note: Data cached for 20 seconds. Based on daily close prices.
+    """
+    symbol = symbol.upper().strip()
+    key = f"maxdd:{symbol}:{period}"
+    hit = _cache_get(key)
+    if hit:
+        return hit
+
+    t = yf.Ticker(symbol)
+    df = t.history(period=period, interval="1d", auto_adjust=True)
+
+    if df is None or df.empty or len(df) < 2:
+        return {
+            "symbol": symbol,
+            "period": period,
+            "error": "Insufficient data to calculate drawdown",
+        }
+
+    # Calculate cumulative returns and running maximum
+    prices = df["Close"]
+    running_max = prices.expanding().max()
+    drawdown = (prices - running_max) / running_max
+
+    # Find maximum drawdown
+    max_dd = float(drawdown.min())
+    max_dd_date = drawdown.idxmin()
+
+    # Find the peak before max drawdown
+    peak_date = running_max[:max_dd_date].idxmax()
+    peak_price = float(running_max[peak_date])
+
+    # Calculate drawdown duration
+    dd_duration = (max_dd_date - peak_date).days
+
+    # Find recovery date (if recovered)
+    recovery_date = None
+    recovery_duration = None
+    is_recovered = False
+
+    future_prices = prices[max_dd_date:]
+    recovered_mask = future_prices >= peak_price
+
+    if recovered_mask.any():
+        recovery_date = future_prices[recovered_mask].index[0]
+        recovery_duration = (recovery_date - max_dd_date).days
+        is_recovered = True
+
+    # Current drawdown
+    current_price = float(prices.iloc[-1])
+    all_time_high = float(prices.max())
+    current_dd = (
+        ((current_price - all_time_high) / all_time_high) if all_time_high > 0 else 0
+    )
+
+    out = {
+        "symbol": symbol,
+        "period": period,
+        "max_drawdown": round(max_dd * 100, 2),  # Convert to %
+        "max_drawdown_duration": dd_duration,
+        "recovery_duration": recovery_duration,
+        "peak_date": str(peak_date.date()) if peak_date is not pd.NaT else None,
+        "trough_date": str(max_dd_date.date()) if max_dd_date is not pd.NaT else None,
+        "recovery_date": str(recovery_date.date())
+        if recovery_date is not None and recovery_date is not pd.NaT
+        else None,
+        "current_drawdown": round(current_dd * 100, 2),  # Convert to %
+        "is_recovered": is_recovered,
+    }
+    return _cache_set(key, out)
+
+
+# Portfolio Analysis Tools
+
+
+@mcp.tool()
+@handle_errors
+def correlation(
+    symbols: list[str],
+    period: str = "1y",
+) -> dict:
+    """
+    Calculate correlation matrix between multiple stocks.
+
+    Correlation shows how stocks move together. Essential for portfolio diversification.
+
+    Use this for: portfolio construction, diversification analysis, finding uncorrelated assets.
+
+    Args:
+        symbols: List of stock ticker symbols (2-20 symbols recommended)
+        period: Time period for calculation
+            - "6mo", "1y": Recent correlations
+            - "3y", "5y": Long-term relationships
+            Default: "1y"
+
+    Returns:
+        dict with:
+        - symbols: List of ticker symbols
+        - period: Time period used
+        - correlation_matrix: Dict of dicts with pairwise correlations
+        - mean_correlation: Average correlation across all pairs
+        - min_correlation: Minimum pairwise correlation
+        - max_correlation: Maximum pairwise correlation (excluding self)
+        - days_analyzed: Number of trading days
+
+    Example:
+        Input: correlation(["AAPL", "MSFT", "GOOGL"], period="1y")
+        Output: {"symbols": ["AAPL", "MSFT", "GOOGL"],
+                 "correlation_matrix": {
+                     "AAPL": {"AAPL": 1.0, "MSFT": 0.75, "GOOGL": 0.68},
+                     "MSFT": {"AAPL": 0.75, "MSFT": 1.0, "GOOGL": 0.82},
+                     ...
+                 },
+                 "mean_correlation": 0.75, ...}
+
+    Interpretation:
+        - Correlation 1.0: Perfect positive correlation
+        - Correlation 0.0: No correlation (ideal for diversification)
+        - Correlation -1.0: Perfect negative correlation (rare)
+        - Mean correlation > 0.7: Highly correlated (poor diversification)
+        - Mean correlation < 0.3: Well diversified
+
+    Analysis Tips:
+        - Look for low/negative correlations for diversification
+        - High correlation = portfolio won't be protected in downturn
+        - Correlations change over time - check multiple periods
+        - Use with portfolio_optimization() to build efficient portfolios
+
+    Note: Data cached for 20 seconds. Requires at least 2 symbols.
+    """
+    if len(symbols) < 2:
+        return {"error": "Need at least 2 symbols for correlation analysis"}
+
+    symbols = [s.upper().strip() for s in symbols]
+    key = f"corr:{':'.join(sorted(symbols))}:{period}"
+    hit = _cache_get(key)
+    if hit:
+        return hit
+
+    # Download data
+    data = yf.download(symbols, period=period, progress=False)
+
+    if data.empty or "Close" not in data:
+        return {
+            "symbols": symbols,
+            "period": period,
+            "error": "Insufficient data for correlation analysis",
+        }
+
+    # Extract close prices
+    try:
+        if isinstance(data.columns, pd.MultiIndex):
+            prices = data["Close"]
+        else:
+            # Single ticker returns non-MultiIndex
+            prices = pd.DataFrame({symbols[0]: data["Close"]})
+    except Exception:
+        return {
+            "symbols": symbols,
+            "period": period,
+            "error": "Error extracting price data",
+        }
+
+    # Calculate returns
+    returns = prices.pct_change().dropna()
+
+    if len(returns) < 20:
+        return {
+            "symbols": symbols,
+            "period": period,
+            "error": "Insufficient data points for correlation",
+        }
+
+    # Calculate correlation matrix
+    corr_df = returns.corr()
+
+    # Convert to nested dict format
+    corr_matrix = {}
+    for sym1 in corr_df.index:
+        corr_matrix[sym1] = {}
+        for sym2 in corr_df.columns:
+            corr_matrix[sym1][sym2] = round(float(corr_df.loc[sym1, sym2]), 3)
+
+    # Calculate statistics (excluding diagonal)
+    mask = np.ones(corr_df.shape, dtype=bool)
+    np.fill_diagonal(mask, False)
+    off_diagonal = corr_df.values[mask]
+
+    out = {
+        "symbols": symbols,
+        "period": period,
+        "correlation_matrix": corr_matrix,
+        "mean_correlation": round(float(np.mean(off_diagonal)), 3),
+        "min_correlation": round(float(np.min(off_diagonal)), 3),
+        "max_correlation": round(float(np.max(off_diagonal)), 3),
+        "days_analyzed": len(returns),
+    }
+    return _cache_set(key, out)
+
+
+@mcp.tool()
+@handle_errors
+def portfolio_metrics(
+    symbols: list[str],
+    weights: list[float],
+    period: str = "1y",
+    risk_free_rate: float = 0.04,
+) -> dict:
+    """
+    Calculate comprehensive portfolio statistics for given holdings and weights.
+
+    Analyze a specific portfolio allocation with detailed risk/return metrics.
+
+    Use this for: evaluating portfolio allocations, comparing strategies, risk analysis.
+
+    Args:
+        symbols: List of stock ticker symbols
+        weights: Portfolio weights (must sum to ~1.0)
+            Example: [0.4, 0.3, 0.3] for 40%, 30%, 30% allocation
+        period: Time period for calculation
+            - "6mo", "1y": Recent performance
+            - "3y", "5y": Long-term analysis
+            Default: "1y"
+        risk_free_rate: Annual risk-free rate (default: 0.04 = 4%)
+
+    Returns:
+        dict with:
+        - symbols: Stock tickers
+        - weights: Portfolio weights
+        - period: Time period
+        - expected_return: Portfolio expected annual return (%)
+        - volatility: Portfolio annualized volatility (%)
+        - sharpe_ratio: Portfolio Sharpe ratio
+        - beta_vs_spy: Portfolio beta vs S&P 500
+        - var_95: Value at Risk at 95% confidence (%)
+        - max_drawdown: Portfolio maximum drawdown (%)
+        - diversification_ratio: Weighted avg vol / portfolio vol
+        - total_return: Total return over period (%)
+
+    Example:
+        Input: portfolio_metrics(
+            symbols=["AAPL", "MSFT", "GOOGL"],
+            weights=[0.4, 0.3, 0.3],
+            period="1y"
+        )
+        Output: {"expected_return": 18.5, "volatility": 22.3,
+                 "sharpe_ratio": 0.82, "diversification_ratio": 1.15, ...}
+
+    Interpretation:
+        - Higher Sharpe = better risk-adjusted returns
+        - VaR_95 = expected max loss in 95% of scenarios
+        - Diversification ratio > 1 = diversification benefit
+        - Compare metrics across different weight allocations
+
+    Analysis Tips:
+        - Use with efficient_frontier() to see if allocation is optimal
+        - Compare Sharpe to individual assets
+        - Check beta to understand market sensitivity
+        - Monitor max_drawdown for downside risk
+
+    Note: Weights must sum to approximately 1.0. Data cached for 20 seconds.
+    """
+    if len(symbols) != len(weights):
+        return {"error": "Number of symbols must match number of weights"}
+
+    if not (0.95 <= sum(weights) <= 1.05):
+        return {"error": f"Weights must sum to ~1.0, got {sum(weights)}"}
+
+    symbols = [s.upper().strip() for s in symbols]
+    weights = np.array(weights)
+
+    key = f"portmetrics:{':'.join(symbols)}:{':'.join(map(str, weights))}:{period}:{risk_free_rate}"
+    hit = _cache_get(key)
+    if hit:
+        return hit
+
+    # Download data
+    data = yf.download(symbols, period=period, progress=False)
+
+    if data.empty or "Close" not in data:
+        return {
+            "symbols": symbols,
+            "weights": weights.tolist(),
+            "period": period,
+            "error": "Insufficient data",
+        }
+
+    # Extract prices and calculate returns
+    try:
+        if isinstance(data.columns, pd.MultiIndex):
+            prices = data["Close"]
+        else:
+            prices = pd.DataFrame({symbols[0]: data["Close"]})
+
+        returns = prices.pct_change().dropna()
+
+        if len(returns) < 20:
+            return {
+                "symbols": symbols,
+                "weights": weights.tolist(),
+                "period": period,
+                "error": "Insufficient return data",
+            }
+
+        # Portfolio returns
+        portfolio_returns = (returns * weights).sum(axis=1)
+
+        # Expected return (annualized)
+        expected_return = float(np.mean(portfolio_returns) * 252)
+
+        # Volatility (annualized)
+        volatility = float(np.std(portfolio_returns, ddof=1) * np.sqrt(252))
+
+        # Sharpe ratio
+        sharpe = (
+            (expected_return - risk_free_rate) / volatility if volatility > 0 else None
+        )
+
+        # Beta vs SPY
+        spy_data = yf.download("SPY", period=period, progress=False)
+        beta_vs_spy = None
+
+        if not spy_data.empty and "Close" in spy_data:
+            spy_returns = spy_data["Close"].pct_change().dropna()
+            aligned = pd.DataFrame(
+                {"portfolio": portfolio_returns, "spy": spy_returns}
+            ).dropna()
+
+            if len(aligned) > 20:
+                cov = float(np.cov(aligned["portfolio"], aligned["spy"])[0][1])
+                var_spy = float(np.var(aligned["spy"], ddof=1))
+                if var_spy > 0:
+                    beta_vs_spy = cov / var_spy
+
+        # VaR at 95% confidence
+        var_95 = float(np.percentile(portfolio_returns, 5) * np.sqrt(252))
+
+        # Max drawdown
+        cumulative = (1 + portfolio_returns).cumprod()
+        running_max = cumulative.expanding().max()
+        drawdown = (cumulative - running_max) / running_max
+        max_dd = float(drawdown.min())
+
+        # Diversification ratio
+        individual_vols = returns.std(ddof=1) * np.sqrt(252)
+        weighted_avg_vol = float((individual_vols * weights).sum())
+        div_ratio = weighted_avg_vol / volatility if volatility > 0 else None
+
+        # Total return
+        total_return = float((cumulative.iloc[-1] - 1))
+
+        out = {
+            "symbols": symbols,
+            "weights": [round(w, 4) for w in weights.tolist()],
+            "period": period,
+            "expected_return": round(expected_return * 100, 2),
+            "volatility": round(volatility * 100, 2),
+            "sharpe_ratio": round(sharpe, 3) if sharpe is not None else None,
+            "beta_vs_spy": round(beta_vs_spy, 3) if beta_vs_spy is not None else None,
+            "var_95": round(var_95 * 100, 2),
+            "max_drawdown": round(max_dd * 100, 2),
+            "diversification_ratio": round(div_ratio, 3)
+            if div_ratio is not None
+            else None,
+            "total_return": round(total_return * 100, 2),
+        }
+        return _cache_set(key, out)
+
+    except Exception as e:
+        return {
+            "symbols": symbols,
+            "weights": weights.tolist(),
+            "period": period,
+            "error": f"Calculation error: {str(e)}",
+        }
+
+
+@mcp.tool()
+@handle_errors
+def efficient_frontier(
+    symbols: list[str],
+    period: str = "1y",
+    risk_free_rate: float = 0.04,
+    num_points: int = 100,
+) -> dict:
+    """
+    Calculate the efficient frontier - the set of optimal portfolios.
+
+    The efficient frontier shows the best possible return for each level of risk.
+    Essential for Modern Portfolio Theory (MPT) based portfolio construction.
+
+    Use this for: finding optimal allocations, visualizing risk/return tradeoffs.
+
+    Args:
+        symbols: List of stock ticker symbols (2-10 recommended)
+        period: Time period for historical data
+            - "1y", "3y", "5y": Different lookback periods
+            Default: "1y"
+        risk_free_rate: Annual risk-free rate (default: 0.04 = 4%)
+        num_points: Number of frontier points to calculate (default: 100)
+
+    Returns:
+        dict with:
+        - symbols: Stock tickers
+        - period: Time period
+        - frontier_points: Array of points, each with:
+            * expected_return: Expected return (%)
+            * volatility: Portfolio volatility (%)
+            * sharpe_ratio: Sharpe ratio
+            * weights: Allocation weights
+        - min_volatility_portfolio: Lowest risk portfolio
+        - max_sharpe_portfolio: Best risk-adjusted portfolio
+        - individual_assets: Return/volatility for each asset
+
+    Example:
+        Input: efficient_frontier(["AAPL", "MSFT", "GOOGL", "BND"])
+        Output: {
+            "frontier_points": [
+                {"expected_return": 8.5, "volatility": 12.3, "weights": [...]},
+                ...
+            ],
+            "max_sharpe_portfolio": {"expected_return": 15.2, ...}
+        }
+
+    Interpretation:
+        - Points on frontier = optimal portfolios (max return for given risk)
+        - Points below frontier = suboptimal allocations
+        - Max Sharpe = best risk-adjusted portfolio
+        - Min volatility = lowest risk portfolio
+
+    Analysis Tips:
+        - Include bonds/defensive assets for better frontier
+        - Max Sharpe often better than min volatility for growth
+        - Check if current portfolio is on the frontier
+        - Use portfolio_optimization() to find specific optimal allocation
+
+    Note: Computationally intensive. Data cached for 20 seconds. Assumes normal distribution.
+    """
+    if len(symbols) < 2:
+        return {"error": "Need at least 2 symbols for efficient frontier"}
+
+    symbols = [s.upper().strip() for s in symbols]
+    key = f"ef:{':'.join(sorted(symbols))}:{period}:{risk_free_rate}:{num_points}"
+    hit = _cache_get(key)
+    if hit:
+        return hit
+
+    # Download data
+    data = yf.download(symbols, period=period, progress=False)
+
+    if data.empty or "Close" not in data:
+        return {
+            "symbols": symbols,
+            "period": period,
+            "error": "Insufficient data",
+        }
+
+    try:
+        if isinstance(data.columns, pd.MultiIndex):
+            prices = data["Close"]
+        else:
+            prices = pd.DataFrame({symbols[0]: data["Close"]})
+
+        returns = prices.pct_change().dropna()
+
+        if len(returns) < 20:
+            return {
+                "symbols": symbols,
+                "period": period,
+                "error": "Insufficient return data",
+            }
+
+        # Calculate expected returns and covariance
+        mean_returns = returns.mean() * 252  # Annualized
+        cov_matrix = returns.cov() * 252  # Annualized
+
+        # Import scipy for optimization
+        from scipy.optimize import minimize
+
+        n_assets = len(symbols)
+
+        # Helper functions
+        def portfolio_stats(weights):
+            returns = np.dot(weights, mean_returns)
+            vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+            return returns, vol
+
+        def neg_sharpe(weights):
+            ret, vol = portfolio_stats(weights)
+            return -(ret - risk_free_rate) / vol if vol > 0 else 0
+
+        def portfolio_volatility(weights):
+            return portfolio_stats(weights)[1]
+
+        # Constraints and bounds
+        constraints = {"type": "eq", "fun": lambda x: np.sum(x) - 1}
+        bounds = tuple((0, 1) for _ in range(n_assets))
+        init_guess = np.array([1.0 / n_assets] * n_assets)
+
+        # Find minimum volatility portfolio
+        opt_min_vol = minimize(
+            portfolio_volatility,
+            init_guess,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+        )
+
+        min_vol_return, min_vol = portfolio_stats(opt_min_vol.x)
+
+        # Find maximum Sharpe ratio portfolio
+        opt_max_sharpe = minimize(
+            neg_sharpe,
+            init_guess,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+        )
+
+        max_sharpe_return, max_sharpe_vol = portfolio_stats(opt_max_sharpe.x)
+
+        # Generate frontier points
+        target_returns = np.linspace(
+            min_vol_return, max_sharpe_return * 1.5, num_points
+        )
+        frontier_points = []
+
+        for target in target_returns:
+            cons = (
+                {"type": "eq", "fun": lambda x: np.sum(x) - 1},
+                {"type": "eq", "fun": lambda x: np.dot(x, mean_returns) - target},
+            )
+
+            result = minimize(
+                portfolio_volatility,
+                init_guess,
+                method="SLSQP",
+                bounds=bounds,
+                constraints=cons,
+            )
+
+            if result.success:
+                ret, vol = portfolio_stats(result.x)
+                sharpe = (ret - risk_free_rate) / vol if vol > 0 else None
+
+                frontier_points.append(
+                    {
+                        "expected_return": round(float(ret * 100), 2),
+                        "volatility": round(float(vol * 100), 2),
+                        "sharpe_ratio": round(float(sharpe), 3) if sharpe else None,
+                        "weights": [round(float(w), 4) for w in result.x],
+                    }
+                )
+
+        # Individual asset stats
+        individual_assets = []
+        for i, symbol in enumerate(symbols):
+            ret = float(mean_returns.iloc[i])
+            vol = float(np.sqrt(cov_matrix.iloc[i, i]))
+            sharpe = (ret - risk_free_rate) / vol if vol > 0 else None
+
+            individual_assets.append(
+                {
+                    "symbol": symbol,
+                    "expected_return": round(ret * 100, 2),
+                    "volatility": round(vol * 100, 2),
+                    "sharpe_ratio": round(sharpe, 3) if sharpe else None,
+                }
+            )
+
+        out = {
+            "symbols": symbols,
+            "period": period,
+            "num_points": len(frontier_points),
+            "frontier_points": frontier_points,
+            "min_volatility_portfolio": {
+                "expected_return": round(float(min_vol_return * 100), 2),
+                "volatility": round(float(min_vol * 100), 2),
+                "sharpe_ratio": round(
+                    float((min_vol_return - risk_free_rate) / min_vol), 3
+                ),
+                "weights": [round(float(w), 4) for w in opt_min_vol.x],
+            },
+            "max_sharpe_portfolio": {
+                "expected_return": round(float(max_sharpe_return * 100), 2),
+                "volatility": round(float(max_sharpe_vol * 100), 2),
+                "sharpe_ratio": round(float(-neg_sharpe(opt_max_sharpe.x)), 3),
+                "weights": [round(float(w), 4) for w in opt_max_sharpe.x],
+            },
+            "individual_assets": individual_assets,
+        }
+        return _cache_set(key, out)
+
+    except Exception as e:
+        return {
+            "symbols": symbols,
+            "period": period,
+            "error": f"Optimization error: {str(e)}",
+        }
+
+
+@mcp.tool()
+@handle_errors
+def portfolio_optimization(
+    symbols: list[str],
+    period: str = "1y",
+    risk_free_rate: float = 0.04,
+    optimization_method: str = "max_sharpe",
+    constraints: dict = None,
+) -> dict:
+    """
+    Find optimal portfolio allocation using Modern Portfolio Theory (MPT).
+
+    Optimize portfolio weights based on different objectives and constraints.
+
+    Use this for: automated portfolio allocation, rebalancing decisions, strategy testing.
+
+    Args:
+        symbols: List of stock ticker symbols
+        period: Historical data period (default: "1y")
+        risk_free_rate: Annual risk-free rate (default: 0.04 = 4%)
+        optimization_method: Optimization objective
+            - "max_sharpe": Maximum Sharpe ratio (best risk-adjusted return)
+            - "min_volatility": Minimum variance (lowest risk)
+            - "max_return": Maximum return (ignores risk - not recommended)
+            - "target_return": Target a specific return level
+            - "target_risk": Target a specific volatility level
+            Default: "max_sharpe"
+        constraints: Optional dict with:
+            - max_weight: Maximum weight per asset (default: 1.0)
+            - min_weight: Minimum weight per asset (default: 0.0)
+            - target_return: Required for "target_return" method (e.g., 0.15 for 15%)
+            - target_risk: Required for "target_risk" method (e.g., 0.20 for 20%)
+
+    Returns:
+        dict with:
+        - symbols: Stock tickers
+        - optimal_weights: Optimized allocation weights
+        - expected_return: Expected annual return (%)
+        - volatility: Portfolio volatility (%)
+        - sharpe_ratio: Portfolio Sharpe ratio
+        - optimization_method: Method used
+        - constraints_applied: Constraints that were applied
+
+    Example:
+        Input: portfolio_optimization(
+            symbols=["AAPL", "MSFT", "BND", "GLD"],
+            optimization_method="max_sharpe",
+            constraints={"max_weight": 0.4, "min_weight": 0.05}
+        )
+        Output: {
+            "optimal_weights": [0.35, 0.30, 0.25, 0.10],
+            "expected_return": 12.5,
+            "sharpe_ratio": 1.45,
+            ...
+        }
+
+    Interpretation:
+        - max_sharpe: Best for growth with reasonable risk
+        - min_volatility: Best for conservative/defensive portfolios
+        - target_return/risk: For specific allocation goals
+        - Use constraints to enforce diversification or limits
+
+    Analysis Tips:
+        - Include diverse assets (stocks, bonds, commodities)
+        - Use max_weight to enforce diversification
+        - Compare results across different methods
+        - Backtest optimized weights before implementing
+        - Reoptimize periodically (quarterly recommended)
+
+    Note: Based on historical data - past performance doesn't guarantee future results.
+    """
+    if len(symbols) < 2:
+        return {"error": "Need at least 2 symbols for optimization"}
+
+    symbols = [s.upper().strip() for s in symbols]
+
+    # Parse constraints
+    if constraints is None:
+        constraints = {}
+
+    max_weight = constraints.get("max_weight", 1.0)
+    min_weight = constraints.get("min_weight", 0.0)
+    target_return = constraints.get("target_return")
+    target_risk = constraints.get("target_risk")
+
+    # Validation
+    if optimization_method == "target_return" and target_return is None:
+        return {"error": "target_return method requires 'target_return' in constraints"}
+
+    if optimization_method == "target_risk" and target_risk is None:
+        return {"error": "target_risk method requires 'target_risk' in constraints"}
+
+    key = f"portopt:{':'.join(sorted(symbols))}:{period}:{optimization_method}:{str(constraints)}"
+    hit = _cache_get(key)
+    if hit:
+        return hit
+
+    # Download data
+    data = yf.download(symbols, period=period, progress=False)
+
+    if data.empty or "Close" not in data:
+        return {
+            "symbols": symbols,
+            "optimization_method": optimization_method,
+            "error": "Insufficient data",
+        }
+
+    try:
+        if isinstance(data.columns, pd.MultiIndex):
+            prices = data["Close"]
+        else:
+            prices = pd.DataFrame({symbols[0]: data["Close"]})
+
+        returns = prices.pct_change().dropna()
+
+        if len(returns) < 20:
+            return {
+                "symbols": symbols,
+                "optimization_method": optimization_method,
+                "error": "Insufficient return data",
+            }
+
+        # Calculate expected returns and covariance
+        mean_returns = returns.mean() * 252  # Annualized
+        cov_matrix = returns.cov() * 252  # Annualized
+
+        from scipy.optimize import minimize
+
+        n_assets = len(symbols)
+
+        def portfolio_stats(weights):
+            ret = np.dot(weights, mean_returns)
+            vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+            return ret, vol
+
+        # Set up optimization based on method
+        if optimization_method == "max_sharpe":
+
+            def objective(weights):
+                ret, vol = portfolio_stats(weights)
+                return -(ret - risk_free_rate) / vol if vol > 0 else 0
+
+        elif optimization_method == "min_volatility":
+
+            def objective(weights):
+                return portfolio_stats(weights)[1]
+
+        elif optimization_method == "max_return":
+
+            def objective(weights):
+                return -portfolio_stats(weights)[0]
+
+        elif optimization_method == "target_return":
+
+            def objective(weights):
+                return portfolio_stats(weights)[1]
+
+        elif optimization_method == "target_risk":
+
+            def objective(weights):
+                return -portfolio_stats(weights)[0]
+
+        else:
+            return {"error": f"Unknown optimization method: {optimization_method}"}
+
+        # Constraints
+        cons = [{"type": "eq", "fun": lambda x: np.sum(x) - 1}]
+
+        if optimization_method == "target_return":
+            cons.append(
+                {"type": "eq", "fun": lambda x: np.dot(x, mean_returns) - target_return}
+            )
+
+        if optimization_method == "target_risk":
+            cons.append(
+                {
+                    "type": "eq",
+                    "fun": lambda x: np.sqrt(np.dot(x.T, np.dot(cov_matrix, x)))
+                    - target_risk,
+                }
+            )
+
+        # Bounds
+        bounds = tuple((min_weight, max_weight) for _ in range(n_assets))
+        init_guess = np.array([1.0 / n_assets] * n_assets)
+
+        # Optimize
+        result = minimize(
+            objective,
+            init_guess,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=cons,
+        )
+
+        if not result.success:
+            return {
+                "symbols": symbols,
+                "optimization_method": optimization_method,
+                "error": f"Optimization failed: {result.message}",
+            }
+
+        optimal_weights = result.x
+        expected_ret, vol = portfolio_stats(optimal_weights)
+        sharpe = (expected_ret - risk_free_rate) / vol if vol > 0 else None
+
+        out = {
+            "symbols": symbols,
+            "optimal_weights": [round(float(w), 4) for w in optimal_weights],
+            "expected_return": round(float(expected_ret * 100), 2),
+            "volatility": round(float(vol * 100), 2),
+            "sharpe_ratio": round(float(sharpe), 3) if sharpe else None,
+            "optimization_method": optimization_method,
+            "constraints_applied": {
+                "max_weight": max_weight,
+                "min_weight": min_weight,
+                "target_return": target_return,
+                "target_risk": target_risk,
+            },
+        }
+        return _cache_set(key, out)
+
+    except Exception as e:
+        return {
+            "symbols": symbols,
+            "optimization_method": optimization_method,
+            "error": f"Optimization error: {str(e)}",
+        }
 
 
 @mcp.tool()
@@ -1849,9 +2870,7 @@ if __name__ == "__main__":
     import os
 
     logger.info("Starting yfinance MCP server")
-    logger.info(
-        f"Configuration: timeout={REQUEST_TIMEOUT}s, rate_limit={RATE_LIMIT_REQUESTS}/min, cache_ttl={TTL_SECONDS}s"
-    )
+    logger.info(f"Configuration: cache_ttl={TTL_SECONDS}s")
 
     parser = argparse.ArgumentParser(description="yfinance MCP Server")
     parser.add_argument(
