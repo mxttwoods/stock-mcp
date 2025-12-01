@@ -18,7 +18,7 @@ from yfinance import EquityQuery, Industry, Sector, screen
 
 # Configure logging
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
+    level=os.getenv("LOG_LEVEL", "DEBUG"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
