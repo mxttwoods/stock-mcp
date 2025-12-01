@@ -1,20 +1,20 @@
 from __future__ import annotations
 
+import logging
 import os
 import time
-import logging
 from dataclasses import dataclass
-from typing import Any, Optional
 from functools import wraps
+from typing import Any, Optional
 
-import yfinance as yf
-from yfinance import Sector, Industry, screen, EquityQuery
+import numpy as np
 import pandas as pd
-
-from fastmcp import FastMCP, Context
-from starlette.exceptions import HTTPException
+import yfinance as yf
+from fastmcp import Context, FastMCP
 from starlette import status
+from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
+from yfinance import EquityQuery, Industry, Sector, screen
 
 # Configure logging
 logging.basicConfig(
@@ -903,6 +903,140 @@ def actions(symbol: str) -> dict:
         rows = []
 
     out = {"symbol": symbol, "actions": rows}
+    return _cache_set(key, out)
+
+
+@mcp.tool()
+@handle_errors
+def sharpe_ratio(
+    symbol: str,
+    period: str = "1y",
+    risk_free_rate: float = 0.04,
+) -> dict:
+    """
+    Calculate the Sharpe ratio for a stock symbol over a specified period.
+
+    The Sharpe ratio measures risk-adjusted return: higher is better.
+    It shows how much excess return you receive for the extra volatility endured.
+
+    Use this for: comparing risk-adjusted performance across stocks, evaluating if returns justify volatility.
+
+    Args:
+        symbol: Stock ticker symbol
+        period: Time period for calculation. Examples:
+            - "1mo", "3mo", "6mo": Short-term analysis
+            - "1y", "2y", "3y", "5y": Long-term analysis
+            - "max": All available history
+            Default: "1y"
+        risk_free_rate: Annual risk-free rate (e.g., 10-year Treasury yield).
+            Default: 0.04 (4%)
+            Common values: 0.03-0.05 depending on current rates
+
+    Returns:
+        dict with:
+        - symbol: The ticker symbol
+        - period: Time period used
+        - risk_free_rate: Risk-free rate used (annual)
+        - sharpe_ratio: The calculated Sharpe ratio
+        - annualized_return: Annual return (%)
+        - annualized_volatility: Annual volatility/standard deviation (%)
+        - total_return: Total return over period (%)
+        - days_analyzed: Number of trading days in analysis
+
+    Example:
+        Input: sharpe_ratio("AAPL", period="1y", risk_free_rate=0.04)
+        Output: {"symbol": "AAPL",
+                 "period": "1y",
+                 "sharpe_ratio": 1.85,
+                 "annualized_return": 28.5,
+                 "annualized_volatility": 13.2,
+                 "total_return": 28.5,
+                 "days_analyzed": 252}
+
+    Interpretation:
+        - Sharpe > 1.0: Good risk-adjusted returns
+        - Sharpe > 2.0: Very good risk-adjusted returns
+        - Sharpe > 3.0: Excellent risk-adjusted returns
+        - Sharpe < 1.0: Returns may not justify the risk
+        - Negative Sharpe: You're losing money vs risk-free rate
+
+    Analysis Tips:
+        - Compare Sharpe ratios across stocks in same sector
+        - Higher Sharpe = better risk-adjusted performance
+        - Use consistent time periods and risk-free rates when comparing
+        - Consider multiple time periods (1y, 3y, 5y) for full picture
+        - Combine with fundamentals() and analyst_recommendations()
+
+    Note: Data is cached for 20 seconds. Based on daily close prices.
+    """
+    symbol = symbol.upper().strip()
+    key = f"sharpe:{symbol}:{period}:{risk_free_rate}"
+    hit = _cache_get(key)
+    if hit:
+        return hit
+
+    # Fetch historical data
+    t = yf.Ticker(symbol)
+    df = t.history(period=period, interval="1d", auto_adjust=True)
+
+    if df is None or df.empty or len(df) < 2:
+        return {
+            "symbol": symbol,
+            "period": period,
+            "risk_free_rate": risk_free_rate,
+            "sharpe_ratio": None,
+            "annualized_return": None,
+            "annualized_volatility": None,
+            "total_return": None,
+            "days_analyzed": 0,
+            "error": "Insufficient data to calculate Sharpe ratio",
+        }
+
+    # Calculate daily returns
+    daily_returns = df["Close"].pct_change().dropna()
+
+    if len(daily_returns) < 2:
+        return {
+            "symbol": symbol,
+            "period": period,
+            "risk_free_rate": risk_free_rate,
+            "sharpe_ratio": None,
+            "annualized_return": None,
+            "annualized_volatility": None,
+            "total_return": None,
+            "days_analyzed": len(daily_returns),
+            "error": "Insufficient returns data",
+        }
+
+    # Calculate metrics
+    mean_daily_return = float(np.mean(daily_returns))
+    std_daily_return = float(np.std(daily_returns, ddof=1))
+
+    # Annualize (assuming 252 trading days per year)
+    trading_days_per_year = 252
+    annualized_return = mean_daily_return * trading_days_per_year
+    annualized_volatility = std_daily_return * np.sqrt(trading_days_per_year)
+
+    # Calculate Sharpe ratio
+    if annualized_volatility == 0:
+        sharpe = None
+    else:
+        excess_return = annualized_return - risk_free_rate
+        sharpe = float(excess_return / annualized_volatility)
+
+    # Calculate total return over period
+    total_return = float((df["Close"].iloc[-1] / df["Close"].iloc[0] - 1))
+
+    out = {
+        "symbol": symbol,
+        "period": period,
+        "risk_free_rate": risk_free_rate,
+        "sharpe_ratio": round(sharpe, 3) if sharpe is not None else None,
+        "annualized_return": round(annualized_return * 100, 2),  # Convert to %
+        "annualized_volatility": round(annualized_volatility * 100, 2),  # Convert to %
+        "total_return": round(total_return * 100, 2),  # Convert to %
+        "days_analyzed": len(daily_returns),
+    }
     return _cache_set(key, out)
 
 

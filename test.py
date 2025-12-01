@@ -3,9 +3,10 @@ Comprehensive test suite for yfinance MCP server.
 Uses FastMCP client library for proper MCP testing.
 """
 
-import asyncio
 import argparse
+import asyncio
 import json
+
 from fastmcp import Client
 
 # Parse arguments
